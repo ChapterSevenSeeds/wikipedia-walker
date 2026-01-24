@@ -1,0 +1,19 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Python File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "env": {
+                "WIKI_START_PAGE_TITLE": "Dream Theater",
+                "WIKI_SLEEP_SECONDS": "1.0",
+                "WIKI_DB_PATH": "dt.sqlite3"
+            }
+        }
+    ]
+}
