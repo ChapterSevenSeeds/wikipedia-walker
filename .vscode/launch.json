@@ -5,14 +5,15 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python Debugger: Python File",
+            "name": "Walker",
             "type": "debugpy",
             "request": "launch",
-            "program": "main.py",
+            "program": "walker.py",
             "env": {
                 "WIKI_START_PAGE_TITLE": "Dream Theater",
                 "WIKI_SLEEP_SECONDS": "1.0",
-                "WIKI_DB_PATH": "dt.sqlite3"
+                "WIKI_DB_PATH": "dt.sqlite3",
+                "WIKI_MAX_PAGES": "0"
             }
         }
     ]

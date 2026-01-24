@@ -25,8 +25,13 @@ class PageCrawlStatus(StrEnum):
 class Page(Base):
     __tablename__ = "pages"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    title: Mapped[str] = mapped_column(String, unique=True, index=True)
+    # Stable unique identity for Wikipedia pages.
+    # https://www.mediawiki.org/wiki/Manual:Page_table
+    mw_page_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    # Canonical page title as returned by the API at the time we last saw it.
+    # Titles can change; mw_page_id is the stable identity.
+    title: Mapped[str] = mapped_column(String, index=True)
 
     crawl_status: Mapped[PageCrawlStatus] = mapped_column(
         SAEnum(PageCrawlStatus, native_enum=False, name="page_crawl_status"),
@@ -70,8 +75,8 @@ class PageLink(Base):
     __table_args__ = (UniqueConstraint("from_page_id", "to_page_id", name="uq_page_links_from_to"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    from_page_id: Mapped[int] = mapped_column(ForeignKey("pages.id"), index=True)
-    to_page_id: Mapped[int] = mapped_column(ForeignKey("pages.id"), index=True)
+    from_page_id: Mapped[int] = mapped_column(ForeignKey("pages.mw_page_id"), index=True)
+    to_page_id: Mapped[int] = mapped_column(ForeignKey("pages.mw_page_id"), index=True)
 
     # When we last observed this edge.
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
