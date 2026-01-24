@@ -24,121 +24,23 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import datetime
 from typing import Iterable, Sequence
 
 import requests
-from sqlalchemy import (
-    DateTime,
-    Enum as SAEnum,
-    ForeignKey,
-    Integer,
-    String,
-    UniqueConstraint,
-    create_engine,
-    func,
-    select,
-)
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from models import Page, PageCrawlStatus, PageLink, init_db, make_engine, utc_now
 
 
 WIKIPEDIA_API_ENDPOINT = "https://en.wikipedia.org/w/api.php"
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-class Base(DeclarativeBase):
-    pass
-
-
-class PageCrawlStatus(StrEnum):
-    queued = "queued"
-    in_progress = "in_progress"
-    done = "done"
-    error = "error"
-
-
-class Page(Base):
-    __tablename__ = "pages"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    title: Mapped[str] = mapped_column(String, unique=True, index=True)
-
-    crawl_status: Mapped[PageCrawlStatus] = mapped_column(
-        SAEnum(PageCrawlStatus, native_enum=False, name="page_crawl_status"),
-        default=PageCrawlStatus.queued,
-        index=True,
-    )
-    last_enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-    last_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-
-    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-
-    # When we last recorded this page's outbound links.
-    last_links_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-
-    last_error: Mapped[str | None] = mapped_column(String, default=None)
-    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
-    out_links: Mapped[list[PageLink]] = relationship(
-        back_populates="from_page",
-        cascade="all, delete-orphan",
-        foreign_keys="PageLink.from_page_id",
-    )
-    in_links: Mapped[list[PageLink]] = relationship(
-        back_populates="to_page",
-        cascade="all, delete-orphan",
-        foreign_keys="PageLink.to_page_id",
-    )
-
-
-class PageLink(Base):
-    __tablename__ = "page_links"
-    __table_args__ = (UniqueConstraint("from_page_id", "to_page_id", name="uq_page_links_from_to"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    from_page_id: Mapped[int] = mapped_column(ForeignKey("pages.id"), index=True)
-    to_page_id: Mapped[int] = mapped_column(ForeignKey("pages.id"), index=True)
-
-    # When we last observed this edge.
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
-    from_page: Mapped[Page] = relationship("Page", foreign_keys=[from_page_id], back_populates="out_links")
-    to_page: Mapped[Page] = relationship("Page", foreign_keys=[to_page_id], back_populates="in_links")
 
 
 @dataclass(frozen=True)
 class FetchResult:
     title: str
     links: set[str]
-
-
-def make_engine(db_path: str):
-    # future=True is the default in SQLAlchemy 2.x
-    return create_engine(f"sqlite:///{db_path}", echo=False)
-
-
-def init_db(engine) -> None:
-    Base.metadata.create_all(engine)
 
 
 def get_user_agent() -> str:
@@ -203,7 +105,6 @@ def get_or_create_page(session: Session, title: str) -> Page:
     page = Page(title=title)
     session.add(page)
     return page
-
 
 
 def enqueue_page(session: Session, *, title: str) -> Page:
@@ -314,6 +215,10 @@ def walk(engine, *, start_title: str, max_pages: int, sleep_seconds: float) -> N
             print(f"Reached WIKI_MAX_PAGES={max_pages}; stopping (progress saved)")
             return
 
+        page_id: int | None = None
+        page_title: str = "(unknown)"
+
+        # 1) Claim a page from the global queue.
         with Session(engine) as session:
             page = next_queued_page(session)
             if page is None:
@@ -325,72 +230,69 @@ def walk(engine, *, start_title: str, max_pages: int, sleep_seconds: float) -> N
 
             page.crawl_status = PageCrawlStatus.in_progress
             page.last_started_at = utc_now()
+            page_id = page.id
+            page_title = page.title
             session.commit()
 
-            page_id = page.id
-
-        # Do the HTTP fetch outside of a long-running DB transaction.
+        # 2) Decide whether we can expand from stored links or must call the API.
         try:
-            now = utc_now()
+            assert page_id is not None
 
-            # First check if we can expand without refetching.
+            fetch_title: str | None = None
+
             with Session(engine) as session:
-                db_page = session.scalar(select(Page).where(Page.id == page_id))
+                db_page = session.get(Page, page_id)
                 if db_page is None:
                     continue
 
+                # Crawl each page only once: if links were already recorded, do not refetch.
                 if db_page.last_links_recorded_at is not None:
-                    outgoing = get_outgoing_titles(session, db_page)
-                    for t in outgoing:
+                    for t in get_outgoing_titles(session, db_page):
                         enqueue_page(session, title=t)
 
                     db_page.crawl_status = PageCrawlStatus.done
                     db_page.last_finished_at = utc_now()
                     session.commit()
+                    visited += 1
                 else:
-                    # Need an API fetch.
-                    do_fetch_title = db_page.title
+                    fetch_title = db_page.title
+
+            # 3) HTTP fetch (outside any DB session).
+            if fetch_title is not None:
+                fetch = mediawiki_fetch_links(fetch_title)
+                now = utc_now()
+
+                # 4) Persist results.
+                with Session(engine) as session:
+                    db_page = session.get(Page, page_id)
+                    if db_page is None:
+                        continue
+
+                    # If the API canonicalizes the title (redirect), store canonical title.
+                    if fetch.title != db_page.title:
+                        existing = session.scalar(select(Page).where(Page.title == fetch.title))
+                        if existing is None:
+                            db_page.title = fetch.title
+                        else:
+                            # Prefer the existing canonical row; keep both for now, but
+                            # mark this one with an error so it's noticeable.
+                            db_page.last_error = "Duplicate title row detected; canonical title already exists"
+                            db_page.last_error_at = utc_now()
+
+                    record_links(session, from_page=db_page, to_titles=fetch.links, now=now)
+
+                    db_page.last_crawled_at = now
+                    db_page.last_links_recorded_at = now
+                    db_page.last_error = None
+                    db_page.last_error_at = None
+
+                    db_page.crawl_status = PageCrawlStatus.done
+                    db_page.last_finished_at = now
                     session.commit()
 
-                    if sleep_seconds > 0:
-                        time.sleep(sleep_seconds)
-                    fetch = mediawiki_fetch_links(do_fetch_title)
-                    now = utc_now()
+                visited += 1
 
-                    with Session(engine) as session2:
-                        db_page2 = session2.scalar(select(Page).where(Page.id == page_id))
-                        if db_page2 is None:
-                            continue
-
-                        # If the API canonicalizes the title (redirect), store canonical title.
-                        if fetch.title != db_page2.title:
-                            existing = session2.scalar(select(Page).where(Page.title == fetch.title))
-                            if existing is None:
-                                db_page2.title = fetch.title
-                            else:
-                                # Prefer the existing canonical row; keep both for now, but
-                                # mark this one with an error so it's noticeable.
-                                db_page2.last_error = "Duplicate title row detected; canonical title already exists"
-                                db_page2.last_error_at = utc_now()
-
-                        record_links(
-                            session2,
-                            from_page=db_page2,
-                            to_titles=fetch.links,
-                            now=now,
-                        )
-
-                        db_page2.last_crawled_at = now
-                        db_page2.last_links_recorded_at = now
-                        db_page2.last_error = None
-                        db_page2.last_error_at = None
-
-                        db_page2.crawl_status = PageCrawlStatus.done
-                        db_page2.last_finished_at = now
-                        session2.commit()
-
-            visited += 1
-
+            # 5) Progress print.
             with Session(engine) as session:
                 queued = session.scalar(
                     select(func.count()).select_from(Page).where(Page.crawl_status == PageCrawlStatus.queued)
@@ -398,24 +300,21 @@ def walk(engine, *, start_title: str, max_pages: int, sleep_seconds: float) -> N
                 done = session.scalar(
                     select(func.count()).select_from(Page).where(Page.crawl_status == PageCrawlStatus.done)
                 )
-                crawled_pages = session.scalar(select(func.count()).select_from(Page).where(Page.last_links_recorded_at.is_not(None)))
+                crawled_pages = session.scalar(
+                    select(func.count()).select_from(Page).where(Page.last_links_recorded_at.is_not(None))
+                )
                 print(f"done={done} queued={queued} crawled_pages={crawled_pages}")
 
         except Exception as exc:
             with Session(engine) as session:
-                db_page = session.scalar(select(Page).where(Page.id == page_id))
+                db_page = session.get(Page, page_id) if page_id is not None else None
                 if db_page is not None:
                     db_page.crawl_status = PageCrawlStatus.error
                     db_page.last_error = f"{type(exc).__name__}: {exc}"
                     db_page.last_error_at = utc_now()
                     db_page.last_finished_at = utc_now()
                 session.commit()
-            title_for_log = "(unknown)"
-            with Session(engine) as session:
-                p = session.scalar(select(Page).where(Page.id == page_id))
-                if p is not None:
-                    title_for_log = p.title
-            print(f"Error crawling '{title_for_log}': {exc}")
+            print(f"Error crawling '{page_title}': {exc}")
 
 
 def export_json(engine, output_path: str) -> None:
