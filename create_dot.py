@@ -4,6 +4,7 @@ Usage:
     python create_dot.py --db path/to/db.sqlite3 --out graph.dot
     python create_dot.py --db path/to/db.sqlite3 --out graph.dot --all-pages
     python create_dot.py --db path/to/db.sqlite3 --out graph.dot --depth 2 --start-title "Dream Theater"
+    python create_dot.py --db path/to/db.sqlite3 --out graph.dot --simplified
 
 Notes:
 - Nodes are pages; node labels are page titles.
@@ -11,6 +12,7 @@ Notes:
 - By default, only crawled pages are included (where last_links_recorded_at is set).
 - If --depth is provided, a subgraph is produced containing only pages within N hops
     from the --start-title (following outgoing links).
+- If --simplified is provided, the output includes at most one incoming edge per node.
 - This emits a DOT file only; it does not require the Graphviz system binaries.
 """
 
@@ -33,7 +35,25 @@ def _node_filter(stmt, *, all_pages: bool):
     return stmt.where(Page.last_links_recorded_at.is_not(None))
 
 
-def build_graph(db_path: str, *, all_pages: bool) -> Digraph:
+def _iter_simplified_edges(rows) -> list[tuple[int, int]]:
+    """Return edges with at most one incoming edge per node.
+
+    Deterministic: callers should order rows by (to_id, from_id) so the selected
+    incoming edge is stable.
+    """
+    seen_to: set[int] = set()
+    edges: list[tuple[int, int]] = []
+    for from_id, to_id in rows:
+        fi = int(from_id)
+        ti = int(to_id)
+        if ti in seen_to:
+            continue
+        seen_to.add(ti)
+        edges.append((fi, ti))
+    return edges
+
+
+def build_graph(db_path: str, *, all_pages: bool, simplified: bool) -> Digraph:
     engine = make_engine(db_path)
 
     graph = Digraph("wikipedia")
@@ -62,8 +82,15 @@ def build_graph(db_path: str, *, all_pages: bool) -> Digraph:
                 )
             )
 
-        for from_id, to_id in session.execute(edges_stmt):
-            graph.edge(str(from_id), str(to_id))
+        edges_stmt = edges_stmt.order_by(PageLink.to_page_id.asc(), PageLink.from_page_id.asc())
+
+        rows = session.execute(edges_stmt)
+        if simplified:
+            for from_id, to_id in _iter_simplified_edges(rows):
+                graph.edge(str(from_id), str(to_id))
+        else:
+            for from_id, to_id in rows:
+                graph.edge(str(from_id), str(to_id))
 
     return graph
 
@@ -74,6 +101,7 @@ def build_graph_from_start(
     start_title: str,
     depth: int,
     all_pages: bool,
+    simplified: bool,
 ) -> Digraph:
     engine = make_engine(db_path)
 
@@ -152,8 +180,12 @@ def build_graph_from_start(
             graph.node(str(page_id), label=title)
 
     # Add edges (after nodes; Graphviz will still accept edges first, but this is tidy).
-    for from_id, to_id in sorted(edges):
-        graph.edge(str(from_id), str(to_id))
+    if simplified:
+        for from_id, to_id in _iter_simplified_edges(sorted(edges, key=lambda e: (e[1], e[0]))):
+            graph.edge(str(from_id), str(to_id))
+    else:
+        for from_id, to_id in sorted(edges):
+            graph.edge(str(from_id), str(to_id))
 
     return graph
 
@@ -166,6 +198,11 @@ def main() -> None:
         "--all-pages",
         action="store_true",
         help="Include all pages (default: include only crawled pages)",
+    )
+    parser.add_argument(
+        "--simplified",
+        action="store_true",
+        help="Only keep at most one incoming edge per node",
     )
     parser.add_argument(
         "--depth",
@@ -191,13 +228,14 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.depth is None:
-        graph = build_graph(args.db, all_pages=bool(args.all_pages))
+        graph = build_graph(args.db, all_pages=bool(args.all_pages), simplified=bool(args.simplified))
     else:
         graph = build_graph_from_start(
             args.db,
             start_title=str(args.start_title),
             depth=int(args.depth),
             all_pages=bool(args.all_pages),
+            simplified=bool(args.simplified),
         )
     out_path.write_text(graph.source, encoding="utf-8")
 
