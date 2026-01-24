@@ -14,10 +14,12 @@ Notes:
 """
 
 from __future__ import annotations
-import os
+
 import time
 from dataclasses import dataclass
+
 import requests
+
 from utils import chunked
 
 WIKIPEDIA_API_ENDPOINT = "https://en.wikipedia.org/w/api.php"
@@ -45,17 +47,11 @@ class MediaWikiFetchResult:
     links: set[MediaWikiPageReference]
 
 
-def get_user_agent() -> str:
-    return os.getenv(
-        "WIKI_USER_AGENT",
-        "wikipedia-walker/1.0 (https://example.invalid; contact: you@example.invalid)",
-    )
-
-
 def mediawiki_resolve_titles_to_pages(
     titles: set[str],
     *,
     sleep_seconds: float,
+    user_agent: str,
 ) -> set[MediaWikiPageReference]:
     """Resolve a set of titles to canonical pages.
 
@@ -69,7 +65,7 @@ def mediawiki_resolve_titles_to_pages(
     if not titles:
         return set()
 
-    headers = {"User-Agent": get_user_agent()}
+    headers = {"User-Agent": user_agent}
     titles_list = sorted(titles)
 
     resolved: set[MediaWikiPageReference] = set()
@@ -141,13 +137,18 @@ def mediawiki_resolve_titles_to_pages(
     return resolved
 
 
-def mediawiki_fetch_links(title: str, *, sleep_seconds: float) -> MediaWikiFetchResult:
+def mediawiki_fetch_links(
+    title: str,
+    *,
+    sleep_seconds: float,
+    user_agent: str,
+) -> MediaWikiFetchResult:
     """Fetch outbound article links for a single Wikipedia page title.
 
     Uses MediaWiki API (action=query&prop=links) and follows pagination via `continue`.
     Only namespace 0 links (articles) are returned.
     """
-    headers = {"User-Agent": get_user_agent()}
+    headers = {"User-Agent": user_agent}
 
     link_titles: set[str] = set()
     continuation_params: dict[str, str] = {}
@@ -199,7 +200,11 @@ def mediawiki_fetch_links(title: str, *, sleep_seconds: float) -> MediaWikiFetch
         raise RuntimeError(f"Could not resolve pageid for '{title}'")
 
     # Go resolve link titles to stable page references.
-    resolved_links = mediawiki_resolve_titles_to_pages(link_titles, sleep_seconds=sleep_seconds)
+    resolved_links = mediawiki_resolve_titles_to_pages(
+        link_titles,
+        sleep_seconds=sleep_seconds,
+        user_agent=user_agent,
+    )
 
     return MediaWikiFetchResult(
         page=MediaWikiPageReference(media_wiki_page_id=int(canonical_page_id), title=canonical_title or title),

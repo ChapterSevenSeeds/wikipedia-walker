@@ -20,7 +20,8 @@ Notes:
 
 from __future__ import annotations
 
-import os
+from config import BackupConfig, WalkerConfig, load_walker_config_from_env
+
 from crawl_db import (
     claim_next_page_from_queue,
     expand_page_from_cached_links,
@@ -32,13 +33,22 @@ from crawl_db import (
     utc_now,
 )
 from mediawiki_api import MediaWikiPageReference, mediawiki_fetch_links, mediawiki_resolve_titles_to_pages
-from utils import BackupConfig, load_backup_config_from_env, run_sqlite_backup
+from utils import run_sqlite_backup
 
 
-def _resolve_start_page(*, start_title: str, sleep_seconds: float) -> MediaWikiPageReference:
+def _resolve_start_page(
+    *,
+    start_title: str,
+    sleep_seconds: float,
+    user_agent: str,
+) -> MediaWikiPageReference:
     """Resolve the user-provided start title into a canonical page reference."""
 
-    resolved = mediawiki_resolve_titles_to_pages({start_title}, sleep_seconds=sleep_seconds)
+    resolved = mediawiki_resolve_titles_to_pages(
+        {start_title},
+        sleep_seconds=sleep_seconds,
+        user_agent=user_agent,
+    )
     if len(resolved) == 0:
         raise SystemExit(f"Start page not found: '{start_title}'")
     
@@ -79,6 +89,7 @@ def walk(
     start_title: str,
     max_pages: int,
     sleep_seconds: float,
+    user_agent: str,
 ) -> None:
     """Run/resume a walk using the `pages` table as the source-of-truth queue.
 
@@ -91,7 +102,11 @@ def walk(
 
     # Resolve the start page up-front so we store a canonical title and a stable
     # mw_page_id (identity is page_id, not title).
-    start_page = _resolve_start_page(start_title=start_title, sleep_seconds=sleep_seconds)
+    start_page = _resolve_start_page(
+        start_title=start_title,
+        sleep_seconds=sleep_seconds,
+        user_agent=user_agent,
+    )
 
     # Prepare the queue.
     initialize_queue(engine, start_page=start_page)
@@ -117,7 +132,11 @@ def walk(
 
             # STEP 3: If not crawled, fetch outbound links from MediaWiki.
             if not expanded_from_cache:
-                fetch = mediawiki_fetch_links(page_title, sleep_seconds=sleep_seconds)
+                fetch = mediawiki_fetch_links(
+                    page_title,
+                    sleep_seconds=sleep_seconds,
+                    user_agent=user_agent,
+                )
                 now = utc_now()
 
                 # STEP 4: Persist the fetched canonical title + edges.
@@ -144,25 +163,16 @@ def walk(
 
 
 if __name__ == "__main__":
-    start_title = os.getenv("WIKI_START_PAGE_TITLE")
-    if not start_title:
-        raise SystemExit(
-            "Missing env var WIKI_START_PAGE_TITLE. Example: set WIKI_START_PAGE_TITLE=Dream Theater"
-        )
+    config: WalkerConfig = load_walker_config_from_env()
 
-    db_path = os.getenv("WIKI_DB_PATH", "wikipedia_walker.sqlite3")
-    max_pages = int(os.getenv("WIKI_MAX_PAGES", "200"))
-    sleep_seconds = float(os.getenv("WIKI_SLEEP_SECONDS", "0.5"))
-
-    backup = load_backup_config_from_env()
-
-    engine = make_engine(db_path)
+    engine = make_engine(config.db_path)
 
     walk(
         engine,
-        db_path=db_path,
-        backup=backup,
-        start_title=start_title,
-        max_pages=max_pages,
-        sleep_seconds=sleep_seconds,
+        db_path=config.db_path,
+        backup=config.backup,
+        start_title=config.start_title,
+        max_pages=config.max_pages,
+        sleep_seconds=config.sleep_seconds,
+        user_agent=config.user_agent,
     )

@@ -7,64 +7,10 @@ The goal is to keep `walker.py` focused on the crawl workflow and persistence
 logic while grouping reusable helpers here.
 """
 
-import os
 import sqlite3
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterator, Sequence
-
-
-@dataclass(frozen=True)
-class BackupConfig:
-    """Configuration for SQLite backups."""
-
-    enabled: bool
-    backup_dir: Path | None
-    max_count: int
-    run_after_crawl_count: int
-
-
-def env_truthy(value: str | None) -> bool:
-    """Interpret environment-variable style booleans.
-
-    Truthy values: 1, true, t, yes, y, on (case-insensitive)
-    """
-
-    if value is None:
-        return False
-    return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-
-
-def load_backup_config_from_env() -> BackupConfig:
-    """Read backup configuration from BACKUP_* environment variables."""
-
-    enabled = env_truthy(os.getenv("BACKUP_ENABLE"))
-    if not enabled:
-        # When disabled, treat backup configuration as non-existent.
-        return BackupConfig(enabled=False, backup_dir=None, max_count=0, run_after_crawl_count=0)
-
-    backup_path = os.getenv("BACKUP_PATH")
-    if not backup_path:
-        raise SystemExit("BACKUP_ENABLE is set but BACKUP_PATH is missing")
-
-    max_count = int(os.getenv("BACKUP_MAX_COUNT", "5"))
-    if max_count < 1:
-        raise SystemExit("BACKUP_MAX_COUNT must be >= 1")
-
-    run_after = int(os.getenv("BACKUP_RUN_AFTER_CRAWL_COUNT", "200"))
-    if run_after < 1:
-        raise SystemExit("BACKUP_RUN_AFTER_CRAWL_COUNT must be >= 1")
-
-    backup_dir = Path(backup_path)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-
-    return BackupConfig(
-        enabled=True,
-        backup_dir=backup_dir,
-        max_count=max_count,
-        run_after_crawl_count=run_after,
-    )
 
 
 def timestamp_for_filename(dt: datetime) -> str:
@@ -78,7 +24,6 @@ def timestamp_for_filename(dt: datetime) -> str:
     """
 
     return dt.strftime("%Y%m%dT%H%M%SZ")
-
 
 def run_sqlite_backup(*, db_path: str, backup_dir: Path, max_count: int) -> Path:
     """Create a consistent SQLite backup using SQLite's Online Backup API.
