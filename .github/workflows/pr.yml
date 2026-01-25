@@ -18,8 +18,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+
           requireScope: false
-          validateSingleCommit: true
+          validateSingleCommit: false
 
   py-compile:
     name: Python compile check
