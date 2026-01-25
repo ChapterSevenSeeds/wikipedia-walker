@@ -47,7 +47,6 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.ccv.outputs.new-tag-version }}
-          commit: main
           generateReleaseNotes: true
           draft: false
           prerelease: false
