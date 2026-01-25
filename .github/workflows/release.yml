@@ -34,49 +34,22 @@ jobs:
         id: ccv
         uses: smlx/ccv@v0.10.0
 
-      - name: Determine release tag (idempotent)
-        id: tag
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ "${{ steps.ccv.outputs.new-tag }}" == "true" ]]; then
-            TAG="${{ steps.ccv.outputs.new-tag-version }}"
-          else
-            # Re-run safety: if a previous attempt already created a tag for this
-            # commit, reuse it. Prefer tags pointing directly at HEAD.
-            TAG="$(git tag --points-at HEAD | sort -V | tail -n 1 || true)"
-            if [[ -z "$TAG" ]]; then
-              TAG="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
-            fi
-          fi
-
-          if [[ -z "$TAG" ]]; then
-            echo "No git tag found for this ref. Ensure at least one tag exists, or introduce Conventional Commits so ccv can tag." >&2
-            exit 1
-          fi
-
-          echo "Using tag: $TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ vars.DOCKERHUB_IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ steps.tag.outputs.tag }}
+            type=raw,value=${{ steps.ccv.outputs.new-tag-version }}
             type=raw,value=latest,enable=${{ inputs.push_latest }}
 
       - name: Create GitHub Release
         uses: ncipollo/release-action@v1
         with:
-          tag: ${{ steps.tag.outputs.tag }}
-          commit: ${{ github.sha }}
+          tag: ${{ steps.ccv.outputs.new-tag-version }}
           generateReleaseNotes: true
           draft: false
           prerelease: false
-          allowUpdates: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -95,5 +68,5 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.tag.outputs.tag }}
+            org.opencontainers.image.version=${{ steps.ccv.outputs.new-tag-version }}
             org.opencontainers.image.revision=${{ github.sha }}
