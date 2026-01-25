@@ -1,4 +1,4 @@
-# wikipedia-walker
+# Wikipedia Walker
 
 A resumable Wikipedia link graph crawler.
 
