@@ -1,11 +1,8 @@
-name: Release (ccv + GitHub release + Docker push)
+name: Release
 
 on:
   workflow_dispatch:
     inputs:
-      image_name:
-        description: Docker Hub image name (e.g. youruser/wikipedia-walker)
-        required: true
       push_latest:
         description: Also push the :latest tag
         type: boolean
@@ -43,7 +40,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ inputs.image_name }}
+          images: ${{ vars.DOCKERHUB_IMAGE_NAME }}
           tags: |
             type=raw,value=${{ steps.ccv.outputs.new-tag-version }}
             type=raw,value=latest,enable=${{ inputs.push_latest }}
