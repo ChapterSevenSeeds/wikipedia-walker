@@ -1,5 +1,7 @@
 """MediaWiki Action API helpers.
 
+See https://www.mediawiki.org/wiki/API:Query
+
 This module isolates the network-facing MediaWiki API operations from the crawler
 workflow in `walker.py`.
 
