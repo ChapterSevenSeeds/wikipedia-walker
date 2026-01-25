@@ -45,24 +45,24 @@ Parsed/validated in `config.py`.
 
 ### Walker
 
-| Env var | Required | Default | Meaning |
-|---|---:|---:|---|
-| `WIKI_START_PAGE_TITLE` | yes | - | Seed page title (only used to seed/expand the DB-backed queue) |
-| `WIKI_DB_PATH` | no | `wikipedia_walker.sqlite3` | SQLite database file path |
-| `WIKI_MAX_PAGES` | no | `200` | Max pages to process per run (`0` = unlimited) |
-| `WIKI_SLEEP_SECONDS` | no | `0.5` | Politeness delay before each API request |
-| `WIKI_USER_AGENT` | no | see `config.py` | HTTP `User-Agent` header (set this to something meaningful) |
+| Env var                 | Required |                    Default | Meaning                                                        |
+| ----------------------- | -------: | -------------------------: | -------------------------------------------------------------- |
+| `WIKI_START_PAGE_TITLE` |      yes |                          - | Seed page title (only used to seed/expand the DB-backed queue) |
+| `WIKI_DB_PATH`          |       no | `wikipedia_walker.sqlite3` | SQLite database file path                                      |
+| `WIKI_MAX_PAGES`        |       no |                      `200` | Max pages to process per run (`0` = unlimited)                 |
+| `WIKI_SLEEP_SECONDS`    |       no |                      `0.5` | Politeness delay before each API request                       |
+| `WIKI_USER_AGENT`       |       no |            see `config.py` | HTTP `User-Agent` header (set this to something meaningful)    |
 
 ### Backups
 
 Backups are optional and use SQLite’s online backup API.
 
-| Env var | Required | Default | Meaning |
-|---|---:|---:|---|
-| `BACKUP_ENABLE` | no | unset/false | Enable backups (`1`, `true`, `yes`, `on`, ...) |
-| `BACKUP_PATH` | if enabled | - | Directory to write backups into |
-| `BACKUP_MAX_COUNT` | no | `5` | Retention count (keeps newest N backups) |
-| `BACKUP_RUN_AFTER_CRAWL_COUNT` | no | `200` | Run a backup every N processed pages |
+| Env var                        |   Required |     Default | Meaning                                        |
+| ------------------------------ | ---------: | ----------: | ---------------------------------------------- |
+| `BACKUP_ENABLE`                |         no | unset/false | Enable backups (`1`, `true`, `yes`, `on`, ...) |
+| `BACKUP_PATH`                  | if enabled |           - | Directory to write backups into                |
+| `BACKUP_MAX_COUNT`             |         no |         `5` | Retention count (keeps newest N backups)       |
+| `BACKUP_RUN_AFTER_CRAWL_COUNT` |         no |       `200` | Run a backup every N processed pages           |
 
 Example (PowerShell):
 
@@ -79,12 +79,12 @@ python walker.py
 
 - `walker.py` orchestrates a run.
 - `mediawiki_api.py` talks to the MediaWiki Action API:
-  - resolves titles → canonical pages (`pageid`) with redirects handled
-  - fetches outbound links with pagination via `prop=links`
+    - resolves titles → canonical pages (`pageid`) with redirects handled
+    - fetches outbound links with pagination via `prop=links`
 - `crawl_db.py` implements all persistence and queue logic:
-  - the `pages` table is the queue source-of-truth (`crawl_status`)
-  - a page is treated as “crawl-once” when `last_links_recorded_at` is set
-  - on startup, interrupted `in_progress` pages are re-queued
+    - the `pages` table is the queue source-of-truth (`crawl_status`)
+    - a page is treated as “crawl-once” when `last_links_recorded_at` is set
+    - on startup, interrupted `in_progress` pages are re-queued
 - `models.py` contains SQLAlchemy ORM models (`Page`, `PageLink`).
 
 This is designed for single-process use. If you want multi-process/parallel crawling, you’ll need a stronger claim/lock strategy around queue claiming.
