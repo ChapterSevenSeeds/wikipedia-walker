@@ -13,7 +13,11 @@
                 "WIKI_START_PAGE_TITLE": "Dream Theater",
                 "WIKI_SLEEP_SECONDS": "1.0",
                 "WIKI_DB_PATH": "dt.sqlite3",
-                "WIKI_MAX_PAGES": "0"
+                "WIKI_MAX_PAGES": "0",
+                "BACKUP_ENABLE": "true",
+                "BACKUP_PATH": "dt-backups",
+                "BACKUP_MAX_COUNT": "5",
+                "BACKUP_RUN_AFTER_CRAWL_COUNT": "50"
             }
         }
     ]
