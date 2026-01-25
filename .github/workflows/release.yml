@@ -1,0 +1,82 @@
+name: Release (ccv + GitHub release + Docker push)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: Docker Hub image name (e.g. youruser/wikipedia-walker)
+        required: true
+      push_latest:
+        description: Also push the :latest tag
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile (sanity check)
+        run: |
+          python -m py_compile *.py
+
+      - name: Bump tag from Conventional Commits (ccv)
+        id: ccv
+        uses: smlx/ccv@v0.10.0
+
+      - name: Docker metadata
+        if: steps.ccv.outputs.new-tag == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.image_name }}
+          tags: |
+            type=raw,value=${{ steps.ccv.outputs.new-tag-version }}
+            type=raw,value=latest,enable=${{ inputs.push_latest }}
+
+      - name: Create GitHub Release
+        if: steps.ccv.outputs.new-tag == 'true'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.ccv.outputs.new-tag-version }}
+          commit: main
+          generateReleaseNotes: true
+          draft: false
+          prerelease: false
+
+      - name: Set up Docker Buildx
+        if: steps.ccv.outputs.new-tag == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: steps.ccv.outputs.new-tag == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        if: steps.ccv.outputs.new-tag == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.ccv.outputs.new-tag-version }}
+            org.opencontainers.image.revision=${{ github.sha }}

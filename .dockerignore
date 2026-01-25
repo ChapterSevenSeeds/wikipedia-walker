@@ -1,0 +1,13 @@
+.git
+.github
+.vscode
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+dt.*
+dt-backups/
+backups*/
