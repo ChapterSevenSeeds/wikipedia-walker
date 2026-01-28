@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import requests
 
@@ -41,36 +42,74 @@ class MediaWikiPageReference:
 
 
 @dataclass(frozen=True)
+class MediaWikiFetchStats:
+    """Timing + rate-limit telemetry for a `mediawiki_fetch_links` invocation."""
+
+    fetch_links_wall_seconds: float
+    resolve_titles_wall_seconds: float
+    fetch_links_http_requests: int
+    resolve_titles_http_requests: int
+    rate_limited_responses: int
+    sleep_seconds_start: float
+    sleep_seconds_end: float
+
+
+def _get_json(
+    *,
+    params: dict[str, str],
+    headers: dict[str, str],
+    sleep_seconds: float,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """GET JSON with a fixed politeness delay (no adaptive throttling)."""
+
+    if sleep_seconds > 0:
+        time.sleep(sleep_seconds)
+
+    response = requests.get(WIKIPEDIA_API_ENDPOINT, params=params, headers=headers, timeout=timeout_seconds)
+    if response.status_code == 429:
+        raise RuntimeError("Rate limited by MediaWiki (HTTP 429)")
+    response.raise_for_status()
+
+    parsed = response.json()
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Expected JSON response but got non-object JSON")
+    return parsed
+
+
+@dataclass(frozen=True)
 class MediaWikiFetchResult:
     """
     Result of fetching outbound links for a single Wikipedia page.
     """
     page: MediaWikiPageReference
     links: set[MediaWikiPageReference]
+    stats: MediaWikiFetchStats
 
 
-def mediawiki_resolve_titles_to_pages(
+def _resolve_titles_to_pages_with_telemetry(
     titles: set[str],
     *,
     sleep_seconds: float,
     user_agent: str,
-) -> set[MediaWikiPageReference]:
-    """Resolve a set of titles to canonical pages.
-
+    
+) -> tuple[set[MediaWikiPageReference], int, float]:
+    """Resolve a set of titles to canonical pages, with telemetry.
     This call follows redirects (including redirects that ultimately land on a
     fragment). When the API reports a redirect with `tofragment`, we intentionally
     ignore the fragment and treat it as a link to the whole target page.
-
-    Returns a set of MediaWikiPageReference for the resolved pages.
-    Missing pages are omitted.
+    Returns a tuple of (set of MediaWikiPageReference, number of HTTP requests made, wall time in seconds).
     """
+    
     if not titles:
-        return set()
+        return set(), 0, 0.0
 
     headers = {"User-Agent": user_agent}
     titles_list = sorted(titles)
-
     resolved: set[MediaWikiPageReference] = set()
+
+    http_requests = 0
+    started = time.monotonic()
 
     for titles_batch in chunked(titles_list, MEDIAWIKI_MAX_TITLES_PER_QUERY):
         params: dict[str, str] = {
@@ -82,12 +121,10 @@ def mediawiki_resolve_titles_to_pages(
             "titles": "|".join(titles_batch),
         }
 
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+        data = _get_json(params=params, headers=headers, sleep_seconds=sleep_seconds)
+        http_requests += 1
 
-        response = requests.get(WIKIPEDIA_API_ENDPOINT, params=params, headers=headers, timeout=30)
-        response.raise_for_status()
-        query = response.json().get("query") or {}
+        query = data.get("query") or {}
 
         normalized_entries = query.get("normalized") or []
         normalized_map: dict[str, str] = {}
@@ -136,6 +173,30 @@ def mediawiki_resolve_titles_to_pages(
             if page_reference is not None:
                 resolved.add(page_reference)
 
+    wall = time.monotonic() - started
+    return resolved, http_requests, wall
+
+
+def mediawiki_resolve_titles_to_pages(
+    titles: set[str],
+    *,
+    sleep_seconds: float,
+    user_agent: str,
+) -> set[MediaWikiPageReference]:
+    """Resolve a set of titles to canonical pages.
+
+    This call follows redirects (including redirects that ultimately land on a
+    fragment). When the API reports a redirect with `tofragment`, we intentionally
+    ignore the fragment and treat it as a link to the whole target page.
+
+    Returns a set of MediaWikiPageReference for the resolved pages.
+    Missing pages are omitted.
+    """
+    resolved, _, _ = _resolve_titles_to_pages_with_telemetry(
+        titles,
+        sleep_seconds=sleep_seconds,
+        user_agent=user_agent,
+    )
     return resolved
 
 
@@ -152,10 +213,15 @@ def mediawiki_fetch_links(
     """
     headers = {"User-Agent": user_agent}
 
+    sleep_start = float(sleep_seconds)
+
     link_titles: set[str] = set()
     continuation_params: dict[str, str] = {}
     canonical_page_id: int | None = None
     canonical_title: str | None = None
+
+    fetch_links_requests = 0
+    fetch_links_started = time.monotonic()
 
     while True:
         params: dict[str, str] = {
@@ -173,12 +239,8 @@ def mediawiki_fetch_links(
         # request.
         params.update(continuation_params)
 
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
-
-        response = requests.get(WIKIPEDIA_API_ENDPOINT, params=params, headers=headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+        data = _get_json(params=params, headers=headers, sleep_seconds=sleep_seconds)
+        fetch_links_requests += 1
 
         pages = (data.get("query") or {}).get("pages") or []
         if pages:
@@ -201,14 +263,26 @@ def mediawiki_fetch_links(
     if canonical_page_id is None:
         raise RuntimeError(f"Could not resolve pageid for '{title}'")
 
+    fetch_links_wall = time.monotonic() - fetch_links_started
+
     # Go resolve link titles to stable page references.
-    resolved_links = mediawiki_resolve_titles_to_pages(
+    resolved_links, resolve_requests, resolve_wall = _resolve_titles_to_pages_with_telemetry(
         link_titles,
         sleep_seconds=sleep_seconds,
         user_agent=user_agent,
     )
+    sleep_end = float(sleep_seconds)
 
     return MediaWikiFetchResult(
         page=MediaWikiPageReference(media_wiki_page_id=int(canonical_page_id), title=canonical_title or title),
         links=resolved_links,
+        stats=MediaWikiFetchStats(
+            fetch_links_wall_seconds=float(fetch_links_wall),
+            resolve_titles_wall_seconds=float(resolve_wall),
+            fetch_links_http_requests=int(fetch_links_requests),
+            resolve_titles_http_requests=int(resolve_requests),
+            rate_limited_responses=0,
+            sleep_seconds_start=float(sleep_start),
+            sleep_seconds_end=float(sleep_end),
+        ),
     )
