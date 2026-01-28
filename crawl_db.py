@@ -101,10 +101,14 @@ def record_links(
     from_page: Page,
     to_pages: Iterable[MediaWikiPageReference],
     now: datetime,
-) -> int:
-    """Upsert pages + edges; enqueue discovered pages."""
+) -> tuple[int, int]:
+    """Upsert pages + edges; enqueue discovered pages.
 
-    created_or_touched = 0
+    Returns (links_added, links_already_existing).
+    """
+
+    links_added = 0
+    links_existing = 0
     for to_ref in to_pages:
         to_page = get_or_create_page(session, to_ref)
         enqueue_page(session, to_ref)
@@ -117,12 +121,12 @@ def record_links(
         )
         if link is None:
             session.add(PageLink(from_page=from_page, to_page=to_page, last_seen_at=now))
+            links_added += 1
         else:
             link.last_seen_at = now
+            links_existing += 1
 
-        created_or_touched += 1
-
-    return created_or_touched
+    return links_added, links_existing
 
 
 def next_queued_page(session: Session) -> Page | None:
@@ -215,29 +219,31 @@ def claim_next_page_from_queue(engine) -> tuple[int, str] | None:
         return int(page.mw_page_id), page.title
 
 
-def expand_page_from_cached_links(engine, *, page_id: int) -> bool:
+def expand_page_from_cached_links(engine, *, page_id: int) -> tuple[bool, int, int]:
     """If the page was already crawled, enqueue its known outgoing pages.
 
-    Returns True if it was already crawled (and we expanded from cached links),
-    else False meaning a fresh fetch is required.
+    Returns (expanded_from_cache, links_added, links_already_existing).
+
+    For cached expansion, links are not added; they already exist in DB.
     """
 
     with Session(engine) as session:
         db_page = session.get(Page, page_id)
         if db_page is None:
-            return True  # Nothing to do; treat as done.
+            return True, 0, 0  # Nothing to do; treat as done.
 
         if db_page.last_links_recorded_at is None:
-            return False
+            return False, 0, 0
 
         # Crawl-once policy: do not refetch; just propagate queue from known edges.
-        for outgoing_ref in get_outgoing_pages(session, db_page):
+        outgoing_refs = list(get_outgoing_pages(session, db_page))
+        for outgoing_ref in outgoing_refs:
             enqueue_page(session, outgoing_ref)
 
         db_page.crawl_status = PageCrawlStatus.done
         db_page.last_finished_at = utc_now()
         session.commit()
-        return True
+        return True, 0, len(outgoing_refs)
     
 def persist_fetched_links(
     engine,
@@ -245,7 +251,7 @@ def persist_fetched_links(
     page_id: int,
     fetch: MediaWikiFetchResult,
     now: datetime,
-) -> None:
+) -> tuple[int, int]:
     """Persist canonical title + outbound edges for a fetched page."""
 
     with Session(engine) as session:
@@ -257,7 +263,7 @@ def persist_fetched_links(
             db_page.title = fetch.page.title
 
         # Persist edges and enqueue discovered pages.
-        record_links(session, from_page=db_page, to_pages=fetch.links, now=now)
+        links_added, links_existing = record_links(session, from_page=db_page, to_pages=fetch.links, now=now)
 
         # Record timestamps used for crawl-once and future recrawl policies.
         db_page.last_crawled_at = now
@@ -271,6 +277,8 @@ def persist_fetched_links(
         db_page.crawl_status = PageCrawlStatus.done
         db_page.last_finished_at = now
         session.commit()
+
+        return links_added, links_existing
 
 
 def record_page_error(engine, *, page_id: int, exc: Exception) -> None:
