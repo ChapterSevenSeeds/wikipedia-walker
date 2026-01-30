@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from dotenv import load_dotenv
 
 ENV_WIKI_START_PAGE_TITLE = "WIKI_START_PAGE_TITLE"
 ENV_WIKI_DB_PATH = "WIKI_DB_PATH"
@@ -139,6 +140,7 @@ def load_backup_config_from_env() -> BackupConfig:
 
 def load_walker_config_from_env() -> WalkerConfig:
     """Load and validate walker configuration from environment variables."""
+    load_dotenv()  # Load environment variables from .env file if present
 
     start_title = _require_env_str(ENV_WIKI_START_PAGE_TITLE)
     db_path = _env_str(ENV_WIKI_DB_PATH, DEFAULT_DB_PATH)
