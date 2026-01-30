@@ -109,10 +109,10 @@ def record_links(
     """
 
     # This is a hot path. Avoid per-link SELECTs by batching:
+    # - Query existing pages before upserting to compute accurate page counts
     # - UPSERT pages in bulk
     # - bulk enqueue pages (single UPDATE)
     # - bulk UPSERT edges (single INSERT..ON CONFLICT DO UPDATE)
-    # - compute added/existing page counts with a single SELECT per chunk
 
     to_refs = list(to_pages)
     if not to_refs:
