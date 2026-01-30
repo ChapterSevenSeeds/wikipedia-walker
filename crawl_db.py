@@ -105,14 +105,14 @@ def record_links(
 ) -> tuple[int, int]:
     """Upsert pages + edges; enqueue discovered pages.
 
-    Returns (links_added, links_already_existing).
+    Returns (pages_created, pages_already_existing).
     """
 
     # This is a hot path. Avoid per-link SELECTs by batching:
+    # - Query existing pages before upserting to compute accurate page counts
     # - UPSERT pages in bulk
     # - bulk enqueue pages (single UPDATE)
     # - bulk UPSERT edges (single INSERT..ON CONFLICT DO UPDATE)
-    # - compute added/existing edge counts with a single SELECT per chunk
 
     to_refs = list(to_pages)
     if not to_refs:
@@ -130,7 +130,18 @@ def record_links(
         for i in range(0, len(items), chunk_size):
             yield items[i : i + chunk_size]
 
-    # 1) Ensure all referenced pages exist, and keep titles fresh.
+    # 1) Query which pages already exist before upserting.
+    existing_page_ids: set[int] = set()
+    for chunk in _chunks(to_ids):
+        rows = session.execute(
+            select(Page.mw_page_id).where(Page.mw_page_id.in_(chunk))
+        ).scalars()
+        existing_page_ids.update(int(v) for v in rows)
+
+    pages_existing = len(existing_page_ids)
+    pages_created = len(to_ids) - pages_existing
+
+    # 2) Ensure all referenced pages exist, and keep titles fresh.
     page_rows = [
         {
             "mw_page_id": pid,
@@ -147,7 +158,7 @@ def record_links(
     )
     session.execute(pages_stmt)
 
-    # 2) Enqueue pages that are eligible (not crawled and not in progress).
+    # 3) Enqueue pages that are eligible (not crawled and not in progress).
     #    This mimics the old `enqueue_page()` policy but does it in bulk.
     for chunk in _chunks(to_ids):
         session.execute(
@@ -159,20 +170,6 @@ def record_links(
             )
             .values(crawl_status=PageCrawlStatus.queued, last_enqueued_at=now)
         )
-
-    # 3) Compute existing edges for (from -> to_ids) in bulk.
-    existing_to_ids: set[int] = set()
-    for chunk in _chunks(to_ids):
-        rows = session.execute(
-            select(PageLink.to_page_id).where(
-                PageLink.from_page_id == from_page.mw_page_id,
-                PageLink.to_page_id.in_(chunk),
-            )
-        ).scalars()
-        existing_to_ids.update(int(v) for v in rows)
-
-    links_existing = len(existing_to_ids)
-    links_added = len(to_ids) - links_existing
 
     # 4) Upsert edges (update last_seen_at for existing rows).
     edge_rows = [
@@ -186,7 +183,7 @@ def record_links(
     )
     session.execute(edges_stmt)
 
-    return links_added, links_existing
+    return pages_created, pages_existing
 
 
 def next_queued_page(session: Session) -> Page | None:
@@ -282,9 +279,9 @@ def claim_next_page_from_queue(engine) -> tuple[int, str] | None:
 def expand_page_from_cached_links(engine, *, page_id: int) -> tuple[bool, int, int]:
     """If the page was already crawled, enqueue its known outgoing pages.
 
-    Returns (expanded_from_cache, links_added, links_already_existing).
+    Returns (expanded_from_cache, pages_created, pages_already_existing).
 
-    For cached expansion, links are not added; they already exist in DB.
+    For cached expansion, pages are not created; they already exist in DB.
     """
 
     with Session(engine) as session:

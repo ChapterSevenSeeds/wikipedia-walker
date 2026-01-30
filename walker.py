@@ -121,8 +121,8 @@ def walk(
     pages_fetched_this_run = 0
     pages_expanded_from_cache_this_run = 0
 
-    total_links_added_this_run = 0
-    total_links_existing_this_run = 0
+    total_pages_created_this_run = 0
+    total_pages_existing_this_run = 0
 
     total_page_wall_seconds = 0.0
 
@@ -158,7 +158,7 @@ def walk(
 
         try:
             # STEP 2: Expand from cached links if the page is already crawled.
-            expanded_from_cache, links_added, links_existing = expand_page_from_cached_links(
+            expanded_from_cache, pages_created, pages_existing = expand_page_from_cached_links(
                 engine, page_id=page_id
             )
 
@@ -176,7 +176,7 @@ def walk(
                 now = utc_now()
 
                 # STEP 4: Persist the fetched canonical title + edges.
-                links_added, links_existing = persist_fetched_links(
+                pages_created, pages_existing = persist_fetched_links(
                     engine, page_id=page_id, fetch=fetch, now=now
                 )
 
@@ -196,8 +196,8 @@ def walk(
             page_wall = time.monotonic() - page_started
             total_page_wall_seconds += float(page_wall)
 
-            total_links_added_this_run += int(links_added)
-            total_links_existing_this_run += int(links_existing)
+            total_pages_created_this_run += int(pages_created)
+            total_pages_existing_this_run += int(pages_existing)
 
             # STEP 5: Optional periodic SQLite backup.
             _maybe_backup_database(
@@ -211,9 +211,9 @@ def walk(
             avg_page_seconds = total_page_wall_seconds / max(1, crawled_pages_this_run)
             eta_seconds = avg_page_seconds * queued_count
 
-            total_links_seen = total_links_added_this_run + total_links_existing_this_run
-            link_cache_hit_rate = (
-                (total_links_existing_this_run / total_links_seen) if total_links_seen > 0 else 0.0
+            total_pages_seen = total_pages_created_this_run + total_pages_existing_this_run
+            page_cache_hit_rate = (
+                (total_pages_existing_this_run / total_pages_seen) if total_pages_seen > 0 else 0.0
             )
 
             avg_api_total_seconds = 0.0
@@ -228,7 +228,7 @@ def walk(
 
             print(
                 f"Visited: {visited_title!r} (mw_page_id={page_id}) "
-                f"in {_fmt_duration(page_wall)} | links_added={links_added} links_existing={links_existing}"
+                f"in {_fmt_duration(page_wall)} | pages_created={pages_created} pages_existing={pages_existing}"
             )
             if not expanded_from_cache:
                 # Total API times (not per chunk).
@@ -255,8 +255,8 @@ def walk(
             print(
                 "Run stats: "
                 f"pages={crawled_pages_this_run} fetched={pages_fetched_this_run} cached={pages_expanded_from_cache_this_run} "
-                f"| Link cache hit rate: {_fmt_percent(link_cache_hit_rate)} "
-                f"({total_links_existing_this_run}/{total_links_seen})"
+                f"| Page cache hit rate: {_fmt_percent(page_cache_hit_rate)} "
+                f"({total_pages_existing_this_run}/{total_pages_seen})"
             )
 
             if pages_fetched_this_run > 0:
