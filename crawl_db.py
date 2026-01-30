@@ -125,7 +125,7 @@ def record_links(
 
     to_ids = list(id_to_title.keys())
 
-    # SQLite has a default max variable count (often 999). Keep chunk sizes conservative.
+    # SQLite has a default max variable count
     def _chunks(items: list[int], chunk_size: int = 500):
         for i in range(0, len(items), chunk_size):
             yield items[i : i + chunk_size]
