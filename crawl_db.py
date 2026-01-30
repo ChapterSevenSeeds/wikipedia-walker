@@ -14,7 +14,8 @@ import json
 from datetime import datetime
 from typing import Iterable, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from mediawiki_api import MediaWikiFetchResult, MediaWikiPageReference
@@ -107,24 +108,83 @@ def record_links(
     Returns (links_added, links_already_existing).
     """
 
-    links_added = 0
-    links_existing = 0
-    for to_ref in to_pages:
-        to_page = get_or_create_page(session, to_ref)
-        enqueue_page(session, to_ref)
+    # This is a hot path. Avoid per-link SELECTs by batching:
+    # - UPSERT pages in bulk
+    # - bulk enqueue pages (single UPDATE)
+    # - bulk UPSERT edges (single INSERT..ON CONFLICT DO UPDATE)
+    # - compute added/existing edge counts with a single SELECT per chunk
 
-        link = session.scalar(
-            select(PageLink).where(
-                PageLink.from_page_id == from_page.mw_page_id,
-                PageLink.to_page_id == to_page.mw_page_id,
+    to_refs = list(to_pages)
+    if not to_refs:
+        return 0, 0
+
+    # De-dupe by page_id (titles can vary; last one wins).
+    id_to_title: dict[int, str] = {}
+    for ref in to_refs:
+        id_to_title[int(ref.media_wiki_page_id)] = ref.title
+
+    to_ids = list(id_to_title.keys())
+
+    # SQLite has a default max variable count (often 999). Keep chunk sizes conservative.
+    def _chunks(items: list[int], chunk_size: int = 500):
+        for i in range(0, len(items), chunk_size):
+            yield items[i : i + chunk_size]
+
+    # 1) Ensure all referenced pages exist, and keep titles fresh.
+    page_rows = [
+        {
+            "mw_page_id": pid,
+            "title": title,
+            "crawl_status": PageCrawlStatus.queued,
+            "last_enqueued_at": now,
+        }
+        for pid, title in id_to_title.items()
+    ]
+    pages_stmt = sqlite_insert(Page).values(page_rows)
+    pages_stmt = pages_stmt.on_conflict_do_update(
+        index_elements=[Page.mw_page_id],
+        set_={"title": pages_stmt.excluded.title},
+    )
+    session.execute(pages_stmt)
+
+    # 2) Enqueue pages that are eligible (not crawled and not in progress).
+    #    This mimics the old `enqueue_page()` policy but does it in bulk.
+    for chunk in _chunks(to_ids):
+        session.execute(
+            update(Page)
+            .where(
+                Page.mw_page_id.in_(chunk),
+                Page.last_links_recorded_at.is_(None),
+                Page.crawl_status.not_in({PageCrawlStatus.done, PageCrawlStatus.in_progress}),
             )
+            .values(crawl_status=PageCrawlStatus.queued, last_enqueued_at=now)
         )
-        if link is None:
-            session.add(PageLink(from_page=from_page, to_page=to_page, last_seen_at=now))
-            links_added += 1
-        else:
-            link.last_seen_at = now
-            links_existing += 1
+
+    # 3) Compute existing edges for (from -> to_ids) in bulk.
+    existing_to_ids: set[int] = set()
+    for chunk in _chunks(to_ids):
+        rows = session.execute(
+            select(PageLink.to_page_id).where(
+                PageLink.from_page_id == from_page.mw_page_id,
+                PageLink.to_page_id.in_(chunk),
+            )
+        ).scalars()
+        existing_to_ids.update(int(v) for v in rows)
+
+    links_existing = len(existing_to_ids)
+    links_added = len(to_ids) - links_existing
+
+    # 4) Upsert edges (update last_seen_at for existing rows).
+    edge_rows = [
+        {"from_page_id": int(from_page.mw_page_id), "to_page_id": int(to_id), "last_seen_at": now}
+        for to_id in to_ids
+    ]
+    edges_stmt = sqlite_insert(PageLink).values(edge_rows)
+    edges_stmt = edges_stmt.on_conflict_do_update(
+        index_elements=[PageLink.from_page_id, PageLink.to_page_id],
+        set_={"last_seen_at": edges_stmt.excluded.last_seen_at},
+    )
+    session.execute(edges_stmt)
 
     return links_added, links_existing
 
