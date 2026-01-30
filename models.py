@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Integer, String, UniqueConstraint, create_engine, func
+from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Integer, String, UniqueConstraint, create_engine, event, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -93,7 +93,54 @@ class PageLink(Base):
 
 
 def make_engine(db_path: str):
-    return create_engine(f"sqlite:///{db_path}", echo=False)
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        echo=False,
+        connect_args={"timeout": 30},
+        # This app is single-process and effectively single-threaded.
+        # Keep the pool at a single connection so SQLite caches/PRAGMAs are not
+        # duplicated across multiple connections (which can waste a lot of RAM).
+        pool_size=1,
+        max_overflow=0,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, connection_record) -> None:  # type: ignore[no-redef]
+        # Pragmas are per-connection.
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON;")
+
+            # WAL drastically reduces writer fsync pressure for write-heavy workloads.
+            cursor.execute("PRAGMA journal_mode=WAL;")
+
+            # NORMAL is a common tradeoff: much faster than FULL with acceptable durability
+            # for a crawler DB (you may lose last transaction on OS crash).
+            cursor.execute("PRAGMA synchronous=NORMAL;")
+
+            # Keep temporary data in memory.
+            cursor.execute("PRAGMA temp_store=MEMORY;")
+
+            # Allow readers/writers to wait rather than erroring immediately.
+            cursor.execute("PRAGMA busy_timeout=5000;")
+
+            # Page cache size (negative means KiB). Use more RAM to cut disk IO.
+            # -524288 ~= 512 MiB.
+            cursor.execute("PRAGMA cache_size=-524288;")
+
+            # Memory-map up to 1 GiB of the DB file (best-effort).
+            cursor.execute("PRAGMA mmap_size=1073741824;")
+
+            # Cap WAL file growth (best-effort; still may exceed temporarily).
+            cursor.execute("PRAGMA journal_size_limit=268435456;")
+
+            # Reduce checkpoint frequency to avoid extra write bursts.
+            # (Pages are 4 KiB by default; 10000 pages ~= 40 MiB.)
+            cursor.execute("PRAGMA wal_autocheckpoint=10000;")
+        finally:
+            cursor.close()
+
+    return engine
 
 
 def init_db(engine) -> None:
