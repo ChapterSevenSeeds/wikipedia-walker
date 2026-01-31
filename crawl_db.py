@@ -320,7 +320,7 @@ def persist_fetched_links(
             db_page.title = fetch.page.title
 
         # Persist edges and enqueue discovered pages.
-        links_added, links_existing = record_links(session, from_page=db_page, to_pages=fetch.links, now=now)
+        pages_added, pages_existing = record_links(session, from_page=db_page, to_pages=fetch.links, now=now)
 
         # Record timestamps used for crawl-once and future recrawl policies.
         db_page.last_crawled_at = now
@@ -335,7 +335,7 @@ def persist_fetched_links(
         db_page.last_finished_at = now
         session.commit()
 
-        return links_added, links_existing
+        return pages_added, pages_existing
 
 
 def record_page_error(engine, *, page_id: int, exc: Exception) -> None:

@@ -226,6 +226,7 @@ def walk(
                 avg_api_total_seconds = avg_api_fetch_seconds + avg_api_resolve_seconds
                 avg_api_http_requests = total_api_http_requests / pages_fetched_this_run
 
+            print("-" * 20)
             print(
                 f"Visited: {visited_title!r} (mw_page_id={page_id}) "
                 f"in {_fmt_duration(page_wall)} | pages_created={pages_created} pages_existing={pages_existing}"
