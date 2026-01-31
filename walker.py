@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 
 import humanfriendly
+from tabulate import tabulate
 
 from config import BackupConfig, WalkerConfig, load_walker_config_from_env
 
@@ -38,6 +39,16 @@ from crawl_db import (
 )
 from mediawiki_api import MediaWikiPageReference, mediawiki_fetch_links, mediawiki_resolve_titles_to_pages
 from utils import run_sqlite_backup
+
+
+def _truncate_ascii(text: str, max_len: int) -> str:
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    return text[: max_len - 3] + "..."
 
 
 def _resolve_start_page(
@@ -121,8 +132,8 @@ def walk(
     pages_fetched_this_run = 0
     pages_expanded_from_cache_this_run = 0
 
-    total_links_added_this_run = 0
-    total_links_existing_this_run = 0
+    total_pages_created_this_run = 0
+    total_pages_existing_this_run = 0
 
     total_page_wall_seconds = 0.0
 
@@ -158,7 +169,7 @@ def walk(
 
         try:
             # STEP 2: Expand from cached links if the page is already crawled.
-            expanded_from_cache, links_added, links_existing = expand_page_from_cached_links(
+            expanded_from_cache, pages_created, pages_existing = expand_page_from_cached_links(
                 engine, page_id=page_id
             )
 
@@ -176,7 +187,7 @@ def walk(
                 now = utc_now()
 
                 # STEP 4: Persist the fetched canonical title + edges.
-                links_added, links_existing = persist_fetched_links(
+                pages_created, pages_existing = persist_fetched_links(
                     engine, page_id=page_id, fetch=fetch, now=now
                 )
 
@@ -196,8 +207,8 @@ def walk(
             page_wall = time.monotonic() - page_started
             total_page_wall_seconds += float(page_wall)
 
-            total_links_added_this_run += int(links_added)
-            total_links_existing_this_run += int(links_existing)
+            total_pages_created_this_run += int(pages_created)
+            total_pages_existing_this_run += int(pages_existing)
 
             # STEP 5: Optional periodic SQLite backup.
             _maybe_backup_database(
@@ -211,9 +222,9 @@ def walk(
             avg_page_seconds = total_page_wall_seconds / max(1, crawled_pages_this_run)
             eta_seconds = avg_page_seconds * queued_count
 
-            total_links_seen = total_links_added_this_run + total_links_existing_this_run
-            link_cache_hit_rate = (
-                (total_links_existing_this_run / total_links_seen) if total_links_seen > 0 else 0.0
+            total_pages_seen = total_pages_created_this_run + total_pages_existing_this_run
+            page_cache_hit_rate = (
+                (total_pages_existing_this_run / total_pages_seen) if total_pages_seen > 0 else 0.0
             )
 
             avg_api_total_seconds = 0.0
@@ -226,50 +237,39 @@ def walk(
                 avg_api_total_seconds = avg_api_fetch_seconds + avg_api_resolve_seconds
                 avg_api_http_requests = total_api_http_requests / pages_fetched_this_run
 
-            print(
-                f"Visited: {visited_title!r} (mw_page_id={page_id}) "
-                f"in {_fmt_duration(page_wall)} | links_added={links_added} links_existing={links_existing}"
-            )
-            if not expanded_from_cache:
-                # Total API times (not per chunk).
-                assert fetch is not None
-                stats = fetch.stats
-                total_api = stats.fetch_links_wall_seconds + stats.resolve_titles_wall_seconds
-                print(
-                    "MediaWiki API: "
-                    f"fetch_links={_fmt_duration(stats.fetch_links_wall_seconds)} "
-                    f"resolve_titles={_fmt_duration(stats.resolve_titles_wall_seconds)} "
-                    f"total={_fmt_duration(total_api)} "
-                    f"http_requests={stats.fetch_links_http_requests + stats.resolve_titles_http_requests} "
-                    f"rate_limited={stats.rate_limited_responses} "
-                    f"sleep={stats.sleep_seconds_start:.3f}s"
-                )
-            else:
-                print("MediaWiki API: (skipped; expanded from cached links)")
-
-            print(
-                f"Progress: done={done_count} queued={queued_count} crawled_pages={crawled_page_count} "
-                f"| ETA={_fmt_duration(eta_seconds)} (avg_page={_fmt_duration(avg_page_seconds)})"
-            )
-
-            print(
-                "Run stats: "
-                f"pages={crawled_pages_this_run} fetched={pages_fetched_this_run} cached={pages_expanded_from_cache_this_run} "
-                f"| Link cache hit rate: {_fmt_percent(link_cache_hit_rate)} "
-                f"({total_links_existing_this_run}/{total_links_seen})"
-            )
-
-            if pages_fetched_this_run > 0:
-                print(
-                    "Averages (fetched pages): "
-                    f"api_total={_fmt_duration(avg_api_total_seconds)} "
-                    f"(fetch_links={_fmt_duration(avg_api_fetch_seconds)}, resolve_titles={_fmt_duration(avg_api_resolve_seconds)}) "
-                    f"http_requests={avg_api_http_requests:.1f}/page "
-                    f"rate_limited_total={total_rate_limited_responses}"
-                )
-
             run_wall = time.monotonic() - run_started
-            print(f"Run wall time: {_fmt_duration(run_wall)}")
+
+            rows: list[tuple[str, str]] = [
+                ("Visited title", repr(visited_title)),
+                ("Run pages", str(crawled_pages_this_run)),
+                ("Progress queued", str(queued_count)),
+                ("Progress crawled_pages", str(crawled_page_count)),
+                ("Avg page time", _fmt_duration(avg_page_seconds)),
+                ("Run wall time", _fmt_duration(run_wall)),
+                ("ETA (drain queue)", _fmt_duration(eta_seconds)),
+                (
+                    "Link cache hit rate",
+                    f"{_fmt_percent(page_cache_hit_rate)} ({total_pages_existing_this_run}/{total_pages_seen})",
+                ),
+            ]
+
+            # Keep output stable across platforms:
+            # - `grid` format is ASCII-only
+            # - `disable_numparse=True` avoids locale/float formatting surprises
+            max_key_width = 34
+            max_value_width = 110
+            table_rows = [
+                (_truncate_ascii(k, max_key_width), _truncate_ascii(v, max_value_width)) for k, v in rows
+            ]
+            print(
+                tabulate(
+                    table_rows,
+                    headers=["Metric", "Value"],
+                    tablefmt="grid",
+                    colalign=("left", "left"),
+                    disable_numparse=True,
+                )
+            )
 
         except Exception as exc:
             # If anything fails during processing, record it on the page and
