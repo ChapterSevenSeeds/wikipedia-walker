@@ -179,10 +179,27 @@ class StatsWebServer:
 
     def stop(self) -> None:
         loop = self._loop
-        if loop is None:
+        thread = getattr(self, "_thread", None)
+        if loop is None or thread is None:
             return
-        asyncio.run_coroutine_threadsafe(self._stop_async(), loop)
+        future = asyncio.run_coroutine_threadsafe(self._stop_async(), loop)
+        try:
+            # Wait for graceful async shutdown (closing websockets, cleanup runner).
+            future.result(timeout=5.0)
+        except BaseException:
+            # Best-effort shutdown; ignore cleanup errors/timeouts.
+            pass
         loop.call_soon_threadsafe(loop.stop)
+        try:
+            thread.join(timeout=5.0)
+        except BaseException:
+            pass
+        with self._lock:
+            self._loop = None
+            self._runner = None
+            # Only reset _thread if it exists.
+            if hasattr(self, "_thread"):
+                self._thread = None
 
     async def _stop_async(self) -> None:
         with self._lock:
