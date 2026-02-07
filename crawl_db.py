@@ -57,11 +57,6 @@ def get_progress_counts(engine) -> tuple[int, int, int]:
     return int(done_count or 0), int(queued_count or 0), int(crawled_page_count or 0)
 
 
-def print_progress(engine) -> None:
-    done_count, queued_count, crawled_page_count = get_progress_counts(engine)
-    print(f"done={done_count} queued={queued_count} crawled_pages={crawled_page_count}")
-
-
 def get_or_create_page(session: Session, ref: MediaWikiPageReference) -> Page:
     """Get or create a Page row for the given MediaWikiPageReference."""
 

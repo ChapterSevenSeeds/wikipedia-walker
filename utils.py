@@ -25,6 +25,16 @@ def timestamp_for_filename(dt: datetime) -> str:
 
     return dt.strftime("%Y%m%dT%H%M%SZ")
 
+
+def truncate_ascii(text: str, max_len: int) -> str:
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    return text[: max_len - 3] + "..."
+
 def run_sqlite_backup(*, db_path: str, backup_dir: Path, max_count: int) -> Path:
     """Create a consistent SQLite backup using SQLite's Online Backup API.
 

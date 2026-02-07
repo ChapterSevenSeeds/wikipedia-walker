@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Wikipedia Walker</title>
+        <style>
+            :root { color-scheme: light dark; }
+            body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+            header { padding: 12px 14px; border-bottom: 1px solid rgba(127,127,127,.25); }
+            h1 { font-size: 16px; margin: 0; }
+            main { padding: 12px 14px; }
+            .meta { font-size: 12px; opacity: .8; margin-top: 6px; }
+            table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+            th, td { padding: 10px 8px; border-bottom: 1px solid rgba(127,127,127,.25); vertical-align: top; }
+            th { text-align: left; font-size: 12px; opacity: .8; }
+            td { word-wrap: break-word; overflow-wrap: anywhere; }
+            .k { width: 42%; font-weight: 600; }
+            .v { width: 58%; }
+            .status { font-size: 12px; opacity: .8; }
+            .pill { display: inline-block; padding: 2px 8px; border: 1px solid rgba(127,127,127,.35); border-radius: 999px; }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>Wikipedia Walker</h1>
+            <div class="meta">
+                <span class="pill" id="conn">connecting…</span>
+                <span id="updated"></span>
+            </div>
+        </header>
+        <main>
+            <table aria-label="Walker stats">
+                <thead>
+                    <tr><th>Metric</th><th>Value</th></tr>
+                </thead>
+                <tbody id="rows"></tbody>
+            </table>
+            <p class="status" id="status"></p>
+        </main>
+        <script>
+            const connEl = document.getElementById('conn');
+            const updatedEl = document.getElementById('updated');
+            const rowsEl = document.getElementById('rows');
+            const statusEl = document.getElementById('status');
+
+            function setConn(text) {
+                connEl.textContent = text;
+            }
+
+            function render(rows) {
+                rowsEl.textContent = '';
+                for (const [k, v] of rows) {
+                    const tr = document.createElement('tr');
+                    const tdK = document.createElement('td');
+                    tdK.className = 'k';
+                    tdK.textContent = k;
+                    const tdV = document.createElement('td');
+                    tdV.className = 'v';
+                    tdV.textContent = v;
+                    tr.appendChild(tdK);
+                    tr.appendChild(tdV);
+                    rowsEl.appendChild(tr);
+                }
+            }
+
+            function wsUrl(path) {
+                const proto = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+                return proto + '//' + location.host + path;
+            }
+
+            let ws;
+            function connect() {
+                setConn('connecting…');
+                statusEl.textContent = '';
+                ws = new WebSocket(wsUrl('/ws'));
+
+                ws.onopen = () => setConn('connected');
+
+                ws.onmessage = (evt) => {
+                    try {
+                        const msg = JSON.parse(evt.data);
+                        if (Array.isArray(msg.rows)) {
+                            render(msg.rows);
+                        }
+                        if (msg.updated_at) {
+                            updatedEl.textContent = 'updated: ' + msg.updated_at;
+                        }
+                        if (msg.status) {
+                            statusEl.textContent = msg.status;
+                        }
+                    } catch (e) {
+                        statusEl.textContent = 'bad message: ' + e;
+                    }
+                };
+
+                ws.onclose = () => {
+                    setConn('disconnected');
+                    statusEl.textContent = 'reconnecting…';
+                    setTimeout(connect, 750);
+                };
+
+                ws.onerror = () => {
+                    // let onclose handle reconnect
+                };
+            }
+
+            connect();
+        </script>
+    </body>
+</html>
