@@ -25,6 +25,8 @@ ENV_WIKI_DB_PATH = "WIKI_DB_PATH"
 ENV_WIKI_MAX_PAGES = "WIKI_MAX_PAGES"
 ENV_WIKI_SLEEP_SECONDS = "WIKI_SLEEP_SECONDS"
 ENV_WIKI_USER_AGENT = "WIKI_USER_AGENT"
+ENV_WIKI_WEB_PORT = "WIKI_WEB_PORT"
+ENV_WIKI_STATS_WINDOW_SIZE = "WIKI_STATS_WINDOW_SIZE"
 
 ENV_BACKUP_ENABLE = "BACKUP_ENABLE"
 ENV_BACKUP_PATH = "BACKUP_PATH"
@@ -34,6 +36,8 @@ ENV_BACKUP_RUN_AFTER_CRAWL_COUNT = "BACKUP_RUN_AFTER_CRAWL_COUNT"
 DEFAULT_DB_PATH = "wikipedia_walker.sqlite3"
 DEFAULT_MAX_PAGES = 200
 DEFAULT_SLEEP_SECONDS = 0.5
+DEFAULT_WEB_PORT = 8000
+DEFAULT_STATS_WINDOW_SIZE = 50
 
 
 _DEFAULT_USER_AGENT = "wikipedia-walker/1.0 (https://example.invalid; contact: you@example.invalid)"
@@ -56,6 +60,8 @@ class WalkerConfig:
     max_pages: int
     sleep_seconds: float
     user_agent: str
+    web_port: int
+    stats_window_size: int
     backup: BackupConfig
 
 
@@ -155,6 +161,14 @@ def load_walker_config_from_env() -> WalkerConfig:
 
     user_agent = _env_str(ENV_WIKI_USER_AGENT, _DEFAULT_USER_AGENT)
 
+    web_port = _env_int(ENV_WIKI_WEB_PORT, DEFAULT_WEB_PORT)
+    if web_port < 1 or web_port > 65535:
+        raise SystemExit(f"{ENV_WIKI_WEB_PORT} must be between 1 and 65535")
+
+    stats_window_size = _env_int(ENV_WIKI_STATS_WINDOW_SIZE, DEFAULT_STATS_WINDOW_SIZE)
+    if stats_window_size < 1:
+        raise SystemExit(f"{ENV_WIKI_STATS_WINDOW_SIZE} must be >= 1")
+
     backup = load_backup_config_from_env()
 
     return WalkerConfig(
@@ -163,5 +177,7 @@ def load_walker_config_from_env() -> WalkerConfig:
         max_pages=max_pages,
         sleep_seconds=sleep_seconds,
         user_agent=user_agent,
+        web_port=web_port,
+        stats_window_size=stats_window_size,
         backup=backup,
     )

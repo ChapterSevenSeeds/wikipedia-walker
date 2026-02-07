@@ -39,6 +39,10 @@ python walker.py
 
 This creates/updates a SQLite DB (default: `wikipedia_walker.sqlite3`) and stores pages + edges as it crawls.
 
+While it runs, open the live stats page (default):
+
+- http://localhost:8000/
+
 ## Configuration (environment variables)
 
 Parsed/validated in `config.py`.
@@ -52,6 +56,8 @@ Parsed/validated in `config.py`.
 | `WIKI_MAX_PAGES`        |       no |                      `200` | Max pages to process per run (`0` = unlimited)                 |
 | `WIKI_SLEEP_SECONDS`    |       no |                      `0.5` | Politeness delay before each API request                       |
 | `WIKI_USER_AGENT`       |       no |            see `config.py` | HTTP `User-Agent` header (set this to something meaningful)    |
+| `WIKI_WEB_PORT`         |       no |                    `8000` | Port for the built-in stats web server                         |
+| `WIKI_STATS_WINDOW_SIZE`|       no |                      `50` | Sliding window size (pages) for averages shown in stats        |
 
 ### Backups
 

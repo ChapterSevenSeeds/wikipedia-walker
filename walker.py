@@ -20,10 +20,9 @@ Notes:
 
 from __future__ import annotations
 
+import signal
+import threading
 import time
-
-import humanfriendly
-from tabulate import tabulate
 
 from config import BackupConfig, WalkerConfig, load_walker_config_from_env
 
@@ -40,15 +39,8 @@ from crawl_db import (
 from mediawiki_api import MediaWikiPageReference, mediawiki_fetch_links, mediawiki_resolve_titles_to_pages
 from utils import run_sqlite_backup
 
-
-def _truncate_ascii(text: str, max_len: int) -> str:
-    if max_len <= 0:
-        return ""
-    if len(text) <= max_len:
-        return text
-    if max_len <= 3:
-        return text[:max_len]
-    return text[: max_len - 3] + "..."
+from stats_server import StatsWebServer
+from walker_stats import WalkerStats
 
 
 def _resolve_start_page(
@@ -66,7 +58,7 @@ def _resolve_start_page(
     )
     if len(resolved) == 0:
         raise SystemExit(f"Start page not found: '{start_title}'")
-    
+
     return next(iter(resolved))
 
 
@@ -105,6 +97,9 @@ def walk(
     max_pages: int,
     sleep_seconds: float,
     user_agent: str,
+    web_port: int,
+    stats_window_size: int,
+    stop_requested: threading.Event,
 ) -> None:
     """Run/resume a walk using the `pages` table as the source-of-truth queue.
 
@@ -126,160 +121,152 @@ def walk(
     # Prepare the queue.
     initialize_queue(engine, start_page=start_page)
 
-    crawled_pages_this_run = 0
-    run_started = time.monotonic()
+    stats = WalkerStats(window_size=int(stats_window_size))
 
-    pages_fetched_this_run = 0
-    pages_expanded_from_cache_this_run = 0
+    with StatsWebServer(port=web_port) as server:
+        print(f"Stats server: http://localhost:{server.port}")
+        server.set_status("running")
 
-    total_pages_created_this_run = 0
-    total_pages_existing_this_run = 0
+        crawled_pages_this_run = 0
 
-    total_page_wall_seconds = 0.0
+        while True:
+            if stop_requested.is_set():
+                print("Stop requested; exiting gracefully (progress saved)")
+                server.set_status("stopping…")
+                server.publish([["Status", "Stopping…"]])
+                return
 
-    total_api_fetch_links_seconds = 0.0
-    total_api_resolve_titles_seconds = 0.0
-    total_api_http_requests = 0
-    total_rate_limited_responses = 0
+            # Stop condition for a bounded run.
+            if max_pages > 0 and crawled_pages_this_run >= max_pages:
+                print(f"Reached WIKI_MAX_PAGES={max_pages}; stopping (progress saved)")
+                server.set_status("stopping")
+                server.publish([["Status", f"Reached max pages ({max_pages})"]])
+                return
 
-    def _fmt_duration(seconds: float) -> str:
-        if seconds < 0:
-            seconds = 0.0
-        # humanfriendly expects seconds.
-        return humanfriendly.format_timespan(seconds)
+            # STEP 1: Claim a page from the global queue.
+            claim = claim_next_page_from_queue(engine)
+            if claim is None:
+                print("Queue empty. Done.")
+                server.set_status("done")
+                server.publish([["Status", "Queue empty"]])
+                return
 
-    def _fmt_percent(value: float) -> str:
-        return f"{value * 100.0:.1f}%"
+            page_id, page_title = claim
+            page_started = time.monotonic()
 
-    while True:
-        # Stop condition for a bounded run.
-        if max_pages > 0 and crawled_pages_this_run >= max_pages:
-            print(f"Reached WIKI_MAX_PAGES={max_pages}; stopping (progress saved)")
-            return
-
-        # STEP 1: Claim a page from the global queue.
-        claim = claim_next_page_from_queue(engine)
-        if claim is None:
-            print("Queue empty. Done.")
-            return
-
-        page_id, page_title = claim
-
-        page_started = time.monotonic()
-
-        try:
-            # STEP 2: Expand from cached links if the page is already crawled.
-            expanded_from_cache, pages_created, pages_existing = expand_page_from_cached_links(
-                engine, page_id=page_id
-            )
-
-            visited_title = page_title
-            fetch = None
-
-            # STEP 3: If not crawled, fetch outbound links from MediaWiki.
-            if not expanded_from_cache:
-                fetch = mediawiki_fetch_links(
-                    page_title,
-                    sleep_seconds=sleep_seconds,
-                    user_agent=user_agent,
-                )
-                visited_title = fetch.page.title
-                now = utc_now()
-
-                # STEP 4: Persist the fetched canonical title + edges.
-                pages_created, pages_existing = persist_fetched_links(
-                    engine, page_id=page_id, fetch=fetch, now=now
+            try:
+                # STEP 2: Expand from cached links if the page is already crawled.
+                expanded_from_cache, pages_created, pages_existing = expand_page_from_cached_links(
+                    engine, page_id=page_id
                 )
 
-                pages_fetched_this_run += 1
-                total_api_fetch_links_seconds += float(fetch.stats.fetch_links_wall_seconds)
-                total_api_resolve_titles_seconds += float(fetch.stats.resolve_titles_wall_seconds)
-                total_api_http_requests += int(
-                    fetch.stats.fetch_links_http_requests + fetch.stats.resolve_titles_http_requests
+                visited_title = page_title
+                was_fetched = False
+                api_fetch_links_seconds = 0.0
+                api_resolve_titles_seconds = 0.0
+                api_http_requests = 0
+                rate_limited_responses = 0
+
+                # STEP 3: If not crawled, fetch outbound links from MediaWiki.
+                if not expanded_from_cache:
+                    fetch = mediawiki_fetch_links(
+                        page_title,
+                        sleep_seconds=sleep_seconds,
+                        user_agent=user_agent,
+                    )
+                    visited_title = fetch.page.title
+                    now = utc_now()
+
+                    # STEP 4: Persist the fetched canonical title + edges.
+                    pages_created, pages_existing = persist_fetched_links(
+                        engine, page_id=page_id, fetch=fetch, now=now
+                    )
+
+                    was_fetched = True
+                    api_fetch_links_seconds = float(fetch.stats.fetch_links_wall_seconds)
+                    api_resolve_titles_seconds = float(fetch.stats.resolve_titles_wall_seconds)
+                    api_http_requests = int(fetch.stats.fetch_links_http_requests + fetch.stats.resolve_titles_http_requests)
+                    rate_limited_responses = int(fetch.stats.rate_limited_responses)
+
+                # A page has been fully processed for this run (either cached or freshly fetched).
+                crawled_pages_this_run += 1
+
+                page_wall = time.monotonic() - page_started
+
+                stats.clear_error()
+                stats.record_page(
+                    visited_title=str(visited_title),
+                    page_wall_seconds=float(page_wall),
+                    pages_created=int(pages_created),
+                    pages_existing=int(pages_existing),
+                    was_fetched=bool(was_fetched),
+                    api_fetch_links_seconds=float(api_fetch_links_seconds),
+                    api_resolve_titles_seconds=float(api_resolve_titles_seconds),
+                    api_http_requests=int(api_http_requests),
+                    rate_limited_responses=int(rate_limited_responses),
                 )
-                total_rate_limited_responses += int(fetch.stats.rate_limited_responses)
-            else:
-                pages_expanded_from_cache_this_run += 1
 
-            # A page has been fully processed for this run (either cached or freshly fetched).
-            crawled_pages_this_run += 1
-
-            page_wall = time.monotonic() - page_started
-            total_page_wall_seconds += float(page_wall)
-
-            total_pages_created_this_run += int(pages_created)
-            total_pages_existing_this_run += int(pages_existing)
-
-            # STEP 5: Optional periodic SQLite backup.
-            _maybe_backup_database(
-                backup=backup,
-                db_path=db_path,
-                crawled_pages_this_run=crawled_pages_this_run,
-            )
-
-            # STEP 6: Verbose per-page stats.
-            done_count, queued_count, crawled_page_count = get_progress_counts(engine)
-            avg_page_seconds = total_page_wall_seconds / max(1, crawled_pages_this_run)
-            eta_seconds = avg_page_seconds * queued_count
-
-            total_pages_seen = total_pages_created_this_run + total_pages_existing_this_run
-            page_cache_hit_rate = (
-                (total_pages_existing_this_run / total_pages_seen) if total_pages_seen > 0 else 0.0
-            )
-
-            avg_api_total_seconds = 0.0
-            avg_api_fetch_seconds = 0.0
-            avg_api_resolve_seconds = 0.0
-            avg_api_http_requests = 0.0
-            if pages_fetched_this_run > 0:
-                avg_api_fetch_seconds = total_api_fetch_links_seconds / pages_fetched_this_run
-                avg_api_resolve_seconds = total_api_resolve_titles_seconds / pages_fetched_this_run
-                avg_api_total_seconds = avg_api_fetch_seconds + avg_api_resolve_seconds
-                avg_api_http_requests = total_api_http_requests / pages_fetched_this_run
-
-            run_wall = time.monotonic() - run_started
-
-            rows: list[tuple[str, str]] = [
-                ("Visited title", repr(visited_title)),
-                ("Run pages", str(crawled_pages_this_run)),
-                ("Progress queued", str(queued_count)),
-                ("Progress crawled_pages", str(crawled_page_count)),
-                ("Avg page time", _fmt_duration(avg_page_seconds)),
-                ("Run wall time", _fmt_duration(run_wall)),
-                ("ETA (drain queue)", _fmt_duration(eta_seconds)),
-                (
-                    "Link cache hit rate",
-                    f"{_fmt_percent(page_cache_hit_rate)} ({total_pages_existing_this_run}/{total_pages_seen})",
-                ),
-            ]
-
-            # Keep output stable across platforms:
-            # - `grid` format is ASCII-only
-            # - `disable_numparse=True` avoids locale/float formatting surprises
-            max_key_width = 34
-            max_value_width = 110
-            table_rows = [
-                (_truncate_ascii(k, max_key_width), _truncate_ascii(v, max_value_width)) for k, v in rows
-            ]
-            print(
-                tabulate(
-                    table_rows,
-                    headers=["Metric", "Value"],
-                    tablefmt="grid",
-                    colalign=("left", "left"),
-                    disable_numparse=True,
+                # STEP 5: Optional periodic SQLite backup.
+                _maybe_backup_database(
+                    backup=backup,
+                    db_path=db_path,
+                    crawled_pages_this_run=crawled_pages_this_run,
                 )
-            )
 
-        except Exception as exc:
-            # If anything fails during processing, record it on the page and
-            # continue to the next queued item.
-            record_page_error(engine, page_id=page_id, exc=exc)
-            print(f"Error crawling '{page_title}': {exc}")
+                # STEP 6: Push per-page stats to the web UI.
+                _, queued_count, crawled_page_count = get_progress_counts(engine)
+                server.set_status("running")
+                server.publish(
+                    stats.to_table_rows(
+                        run_pages=crawled_pages_this_run,
+                        queued_count=queued_count,
+                        crawled_page_count=crawled_page_count,
+                    )
+                )
+
+            except Exception as exc:
+                # If anything fails during processing, record it on the page and
+                # continue to the next queued item.
+                record_page_error(engine, page_id=page_id, exc=exc)
+                print(f"Error crawling '{page_title}': {exc}")
+
+                stats.record_error(page_title=page_title, exc=exc)
+                server.set_status("error")
+
+                _, queued_count, crawled_page_count = get_progress_counts(engine)
+                server.publish(
+                    stats.to_table_rows(
+                        run_pages=crawled_pages_this_run,
+                        queued_count=queued_count,
+                        crawled_page_count=crawled_page_count,
+                    )
+                )
 
 
 if __name__ == "__main__":
     config: WalkerConfig = load_walker_config_from_env()
+
+    stop_requested = threading.Event()
+
+    def _handle_stop_signal(signum: int, _frame) -> None:  # type: ignore[no-untyped-def]
+        stop_requested.set()
+        signame = None
+        try:
+            signame = signal.Signals(signum).name
+        except Exception:
+            pass
+        if signame:
+            print(f"Received {signame}; will stop after current page")
+        else:
+            print("Stop requested; will stop after current page")
+
+    signal.signal(signal.SIGINT, _handle_stop_signal)
+    if hasattr(signal, "SIGTERM"):
+        try:
+            signal.signal(signal.SIGTERM, _handle_stop_signal)
+        except Exception:
+            # Some platforms / environments may not permit SIGTERM handlers.
+            pass
 
     engine = make_engine(config.db_path)
 
@@ -291,4 +278,7 @@ if __name__ == "__main__":
         max_pages=config.max_pages,
         sleep_seconds=config.sleep_seconds,
         user_agent=config.user_agent,
+        web_port=config.web_port,
+        stats_window_size=config.stats_window_size,
+        stop_requested=stop_requested,
     )

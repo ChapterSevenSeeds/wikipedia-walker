@@ -18,6 +18,7 @@ RUN pip install --upgrade pip \
 
 # Copy only the app sources.
 COPY *.py ./
+COPY *.html ./
 
 
 FROM python:3.12-alpine AS runtime
