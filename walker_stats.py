@@ -138,7 +138,7 @@ class WalkerStats:
             ("Visited title", repr(visited_title)),
             ("Run pages", str(int(run_pages))),
             ("Progress queued", str(int(queued_count))),
-            ("Progress crawled_pages", str(int(crawled_page_count))),
+            ("Progress crawled pages", str(int(crawled_page_count))),
             (
                 f"Avg page time (last {len(self._window)}/{self._window_size})",
                 self._fmt_duration(avg_page_seconds),
