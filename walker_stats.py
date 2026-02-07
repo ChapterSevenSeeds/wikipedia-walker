@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import humanfriendly
@@ -90,16 +91,16 @@ class WalkerStats:
     def _fmt_percent(self, value: float) -> str:
         return f"{value * 100.0:.1f}%"
 
-    def _avg(self, values) -> float:
+    def _avg(self, values: Iterable[float]) -> float:
         """Compute average from an iterable without creating intermediate lists."""
         total = 0.0
         count = 0
         for val in values:
-            total += float(val)
+            total += val
             count += 1
         if count == 0:
             return 0.0
-        return total / float(count)
+        return total / count
 
     def _run_wall_seconds(self) -> float:
         return max(0.0, float(time.monotonic() - self._run_started))
