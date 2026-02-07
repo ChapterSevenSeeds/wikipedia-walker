@@ -118,8 +118,7 @@ class StatsWebServer:
             self._ws_clients.add(ws)
             payload = self._make_payload(self._last_rows)
 
-        if payload is not None:
-            await ws.send_str(json.dumps(payload, ensure_ascii=True))
+        await ws.send_str(json.dumps(payload, ensure_ascii=True))
 
         try:
             async for _ in ws:
