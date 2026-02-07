@@ -90,16 +90,22 @@ class WalkerStats:
     def _fmt_percent(self, value: float) -> str:
         return f"{value * 100.0:.1f}%"
 
-    def _avg(self, values: list[float]) -> float:
-        if not values:
+    def _avg(self, values) -> float:
+        """Compute average from an iterable without creating intermediate lists."""
+        total = 0.0
+        count = 0
+        for val in values:
+            total += float(val)
+            count += 1
+        if count == 0:
             return 0.0
-        return float(sum(values)) / float(len(values))
+        return total / float(count)
 
     def _run_wall_seconds(self) -> float:
         return max(0.0, float(time.monotonic() - self._run_started))
 
     def _window_avg_page_seconds(self) -> float:
-        return self._avg([o.page_wall_seconds for o in self._window])
+        return self._avg(o.page_wall_seconds for o in self._window)
 
     def to_table_rows(
         self,
@@ -121,11 +127,11 @@ class WalkerStats:
         )
 
         fetched = [o for o in self._window if o.was_fetched]
-        avg_api_fetch_seconds = self._avg([o.api_fetch_links_seconds for o in fetched])
-        avg_api_resolve_seconds = self._avg([o.api_resolve_titles_seconds for o in fetched])
+        avg_api_fetch_seconds = self._avg(o.api_fetch_links_seconds for o in fetched)
+        avg_api_resolve_seconds = self._avg(o.api_resolve_titles_seconds for o in fetched)
         avg_api_total_seconds = avg_api_fetch_seconds + avg_api_resolve_seconds
-        avg_api_http_requests = self._avg([float(o.api_http_requests) for o in fetched])
-        avg_rate_limited_responses = self._avg([float(o.rate_limited_responses) for o in fetched])
+        avg_api_http_requests = self._avg(float(o.api_http_requests) for o in fetched)
+        avg_rate_limited_responses = self._avg(float(o.rate_limited_responses) for o in fetched)
 
         rows: list[tuple[str, str]] = [
             ("Visited title", repr(visited_title)),
