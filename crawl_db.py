@@ -52,8 +52,8 @@ def ensure_schema(engine) -> None:
     init_db(engine)
 
 
-def get_progress_counts(engine) -> tuple[int, int, int, float]:
-    """Return (done_count, queued_count, crawled_page_count, elapsed_seconds)."""
+def get_progress_counts(engine) -> tuple[int, int, int, DbTimings]:
+    """Return (done_count, queued_count, crawled_page_count, timings)."""
 
     t0 = time.monotonic()
     with Session(engine) as session:
@@ -68,7 +68,7 @@ def get_progress_counts(engine) -> tuple[int, int, int, float]:
         )
     elapsed = time.monotonic() - t0
 
-    return int(done_count or 0), int(queued_count or 0), int(crawled_page_count or 0), float(elapsed)
+    return int(done_count or 0), int(queued_count or 0), int(crawled_page_count or 0), DbTimings(progress_counts_seconds=elapsed)
 
 
 def get_or_create_page(session: Session, ref: MediaWikiPageReference) -> Page:
@@ -267,10 +267,10 @@ def initialize_queue(engine, *, start_page: MediaWikiPageReference) -> None:
         session.commit()
 
 
-def claim_next_page_from_queue(engine) -> tuple[int, str, float] | None:
+def claim_next_page_from_queue(engine) -> tuple[int, str, DbTimings] | None:
     """Atomically claim the next queued page (single-process design).
 
-    Returns (mw_page_id, title, elapsed_seconds) or None if nothing claimable exists.
+    Returns (mw_page_id, title, timings) or None if nothing claimable exists.
     """
 
     t0 = time.monotonic()
@@ -284,13 +284,13 @@ def claim_next_page_from_queue(engine) -> tuple[int, str, float] | None:
         session.commit()
 
         elapsed = time.monotonic() - t0
-        return int(page.mw_page_id), page.title, float(elapsed)
+        return int(page.mw_page_id), page.title, DbTimings(claim_seconds=elapsed)
 
 
-def expand_page_from_cached_links(engine, *, page_id: int) -> tuple[bool, int, int, float]:
+def expand_page_from_cached_links(engine, *, page_id: int) -> tuple[bool, int, int, DbTimings]:
     """If the page was already crawled, enqueue its known outgoing pages.
 
-    Returns (expanded_from_cache, pages_created, pages_already_existing, elapsed_seconds).
+    Returns (expanded_from_cache, pages_created, pages_already_existing, timings).
 
     For cached expansion, pages are not created; they already exist in DB.
     """
@@ -300,11 +300,11 @@ def expand_page_from_cached_links(engine, *, page_id: int) -> tuple[bool, int, i
         db_page = session.get(Page, page_id)
         if db_page is None:
             elapsed = time.monotonic() - t0
-            return True, 0, 0, float(elapsed)
+            return True, 0, 0, DbTimings(expand_cache_seconds=elapsed)
 
         if db_page.last_links_recorded_at is None:
             elapsed = time.monotonic() - t0
-            return False, 0, 0, float(elapsed)
+            return False, 0, 0, DbTimings(expand_cache_seconds=elapsed)
 
         # Crawl-once policy: do not refetch; just propagate queue from known edges.
         outgoing_refs = list(get_outgoing_pages(session, db_page))
@@ -315,7 +315,7 @@ def expand_page_from_cached_links(engine, *, page_id: int) -> tuple[bool, int, i
         db_page.last_finished_at = utc_now()
         session.commit()
         elapsed = time.monotonic() - t0
-        return True, 0, len(outgoing_refs), float(elapsed)
+        return True, 0, len(outgoing_refs), DbTimings(expand_cache_seconds=elapsed)
     
 def persist_fetched_links(
     engine,
@@ -323,10 +323,10 @@ def persist_fetched_links(
     page_id: int,
     fetch: MediaWikiFetchResult,
     now: datetime,
-) -> tuple[int, int, float]:
+) -> tuple[int, int, DbTimings]:
     """Persist canonical title + outbound edges for a fetched page.
 
-    Returns (pages_added, pages_existing, elapsed_seconds).
+    Returns (pages_added, pages_existing, timings).
     """
 
     t0 = time.monotonic()
@@ -355,27 +355,27 @@ def persist_fetched_links(
         session.commit()
 
         elapsed = time.monotonic() - t0
-        return pages_added, pages_existing, float(elapsed)
+        return pages_added, pages_existing, DbTimings(persist_links_seconds=elapsed)
 
 
-def record_page_error(engine, *, page_id: int, exc: Exception) -> float:
+def record_page_error(engine, *, page_id: int, exc: Exception) -> DbTimings:
     """Record an error for a page and mark it as failed.
 
-    Returns elapsed_seconds.
+    Returns timings.
     """
 
     t0 = time.monotonic()
     with Session(engine) as session:
         db_page = session.get(Page, page_id)
         if db_page is None:
-            return float(time.monotonic() - t0)
+            return DbTimings(record_error_seconds=float(time.monotonic() - t0))
 
         db_page.crawl_status = PageCrawlStatus.error
         db_page.last_error = f"{type(exc).__name__}: {exc}"
         db_page.last_error_at = utc_now()
         db_page.last_finished_at = utc_now()
         session.commit()
-    return float(time.monotonic() - t0)
+    return DbTimings(record_error_seconds=float(time.monotonic() - t0))
 
 
 def export_json(engine, output_path: str) -> None:

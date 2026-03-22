@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 
 import humanfriendly
 
+from crawl_db import DbTimings
 from utils import truncate_ascii
 
 
@@ -67,13 +68,10 @@ class WalkerStats:
         api_resolve_titles_seconds: float,
         api_http_requests: int,
         rate_limited_responses: int,
-        db_claim_seconds: float = 0.0,
-        db_expand_cache_seconds: float = 0.0,
-        db_persist_links_seconds: float = 0.0,
-        db_progress_counts_seconds: float = 0.0,
-        db_record_error_seconds: float = 0.0,
+        db_timings: DbTimings | None = None,
     ) -> None:
         self._last_visited_title = visited_title
+        t = db_timings or DbTimings()
         self._window.append(
             PageObservation(
                 page_wall_seconds=float(page_wall_seconds),
@@ -84,16 +82,17 @@ class WalkerStats:
                 api_resolve_titles_seconds=float(api_resolve_titles_seconds),
                 api_http_requests=int(api_http_requests),
                 rate_limited_responses=int(rate_limited_responses),
-                db_claim_seconds=float(db_claim_seconds),
-                db_expand_cache_seconds=float(db_expand_cache_seconds),
-                db_persist_links_seconds=float(db_persist_links_seconds),
-                db_progress_counts_seconds=float(db_progress_counts_seconds),
-                db_record_error_seconds=float(db_record_error_seconds),
+                db_claim_seconds=float(t.claim_seconds),
+                db_expand_cache_seconds=float(t.expand_cache_seconds),
+                db_persist_links_seconds=float(t.persist_links_seconds),
+                db_progress_counts_seconds=float(t.progress_counts_seconds),
+                db_record_error_seconds=float(t.record_error_seconds),
             )
         )
 
-    def record_error(self, *, page_title: str, exc: BaseException) -> None:
+    def record_error(self, *, page_title: str, exc: BaseException, db_timings: DbTimings | None = None) -> None:
         self._last_error = f"{page_title}: {exc}"
+        self._last_error_db_timings = db_timings
 
     def patch_last_db_progress_counts(self, seconds: float) -> None:
         """Update the most recent observation's progress_counts timing.
