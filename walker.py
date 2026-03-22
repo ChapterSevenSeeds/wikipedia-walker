@@ -234,11 +234,10 @@ def walk(
             except Exception as exc:
                 # If anything fails during processing, record it on the page and
                 # continue to the next queued item.
-                error_timings = record_page_error(engine, page_id=page_id, exc=exc)
-                db_timings.record_error_seconds = error_timings.record_error_seconds
+                record_page_error(engine, page_id=page_id, exc=exc)
                 print(f"Error crawling '{page_title}': {exc}")
 
-                stats.record_error(page_title=page_title, exc=exc, db_timings=db_timings)
+                stats.record_error(page_title=page_title, exc=exc)
                 server.set_status("error")
 
                 _, queued_count, crawled_page_count, _ = get_progress_counts(engine)

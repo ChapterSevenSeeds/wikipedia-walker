@@ -31,7 +31,6 @@ class PageObservation:
     db_expand_cache_seconds: float
     db_persist_links_seconds: float
     db_progress_counts_seconds: float
-    db_record_error_seconds: float
 
 
 class WalkerStats:
@@ -86,13 +85,11 @@ class WalkerStats:
                 db_expand_cache_seconds=float(t.expand_cache_seconds),
                 db_persist_links_seconds=float(t.persist_links_seconds),
                 db_progress_counts_seconds=float(t.progress_counts_seconds),
-                db_record_error_seconds=float(t.record_error_seconds),
             )
         )
 
-    def record_error(self, *, page_title: str, exc: BaseException, db_timings: DbTimings | None = None) -> None:
+    def record_error(self, *, page_title: str, exc: BaseException) -> None:
         self._last_error = f"{page_title}: {exc}"
-        self._last_error_db_timings = db_timings
 
     def patch_last_db_progress_counts(self, seconds: float) -> None:
         """Update the most recent observation's progress_counts timing.
@@ -196,8 +193,7 @@ class WalkerStats:
         avg_db_expand = self._avg(o.db_expand_cache_seconds for o in self._window)
         avg_db_persist = self._avg(o.db_persist_links_seconds for o in self._window)
         avg_db_progress = self._avg(o.db_progress_counts_seconds for o in self._window)
-        avg_db_error = self._avg(o.db_record_error_seconds for o in self._window)
-        avg_db_total = avg_db_claim + avg_db_expand + avg_db_persist + avg_db_progress + avg_db_error
+        avg_db_total = avg_db_claim + avg_db_expand + avg_db_persist + avg_db_progress
 
         rows.append((
             f"Avg DB total (last {wlen})",
@@ -207,8 +203,6 @@ class WalkerStats:
         rows.append(("Avg DB expand_cache", self._fmt_duration(avg_db_expand)))
         rows.append(("Avg DB persist_links", self._fmt_duration(avg_db_persist)))
         rows.append(("Avg DB progress_counts", self._fmt_duration(avg_db_progress)))
-        if avg_db_error > 0:
-            rows.append(("Avg DB record_error", self._fmt_duration(avg_db_error)))
 
         if self._last_error:
             rows.append(("Last error", self._last_error))

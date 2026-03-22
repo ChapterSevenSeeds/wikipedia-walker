@@ -31,7 +31,6 @@ class DbTimings:
     expand_cache_seconds: float = 0.0
     persist_links_seconds: float = 0.0
     progress_counts_seconds: float = 0.0
-    record_error_seconds: float = 0.0
 
 
 def make_engine(db_path: str):
@@ -358,24 +357,19 @@ def persist_fetched_links(
         return pages_added, pages_existing, DbTimings(persist_links_seconds=elapsed)
 
 
-def record_page_error(engine, *, page_id: int, exc: Exception) -> DbTimings:
-    """Record an error for a page and mark it as failed.
+def record_page_error(engine, *, page_id: int, exc: Exception) -> None:
+    """Record an error for a page and mark it as failed."""
 
-    Returns timings.
-    """
-
-    t0 = time.monotonic()
     with Session(engine) as session:
         db_page = session.get(Page, page_id)
         if db_page is None:
-            return DbTimings(record_error_seconds=float(time.monotonic() - t0))
+            return
 
         db_page.crawl_status = PageCrawlStatus.error
         db_page.last_error = f"{type(exc).__name__}: {exc}"
         db_page.last_error_at = utc_now()
         db_page.last_finished_at = utc_now()
         session.commit()
-    return DbTimings(record_error_seconds=float(time.monotonic() - t0))
 
 
 def export_json(engine, output_path: str) -> None:
