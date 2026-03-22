@@ -151,12 +151,12 @@ def walk(
                 server.publish([["Status", "Queue empty"]])
                 return
 
-            page_id, page_title = claim
+            page_id, page_title, db_claim_seconds = claim
             page_started = time.monotonic()
 
             try:
                 # STEP 2: Expand from cached links if the page is already crawled.
-                expanded_from_cache, pages_created, pages_existing = expand_page_from_cached_links(
+                expanded_from_cache, pages_created, pages_existing, db_expand_seconds = expand_page_from_cached_links(
                     engine, page_id=page_id
                 )
 
@@ -166,6 +166,7 @@ def walk(
                 api_resolve_titles_seconds = 0.0
                 api_http_requests = 0
                 rate_limited_responses = 0
+                db_persist_seconds = 0.0
 
                 # STEP 3: If not crawled, fetch outbound links from MediaWiki.
                 if not expanded_from_cache:
@@ -178,7 +179,7 @@ def walk(
                     now = utc_now()
 
                     # STEP 4: Persist the fetched canonical title + edges.
-                    pages_created, pages_existing = persist_fetched_links(
+                    pages_created, pages_existing, db_persist_seconds = persist_fetched_links(
                         engine, page_id=page_id, fetch=fetch, now=now
                     )
 
@@ -204,6 +205,9 @@ def walk(
                     api_resolve_titles_seconds=float(api_resolve_titles_seconds),
                     api_http_requests=int(api_http_requests),
                     rate_limited_responses=int(rate_limited_responses),
+                    db_claim_seconds=float(db_claim_seconds),
+                    db_expand_cache_seconds=float(db_expand_seconds),
+                    db_persist_links_seconds=float(db_persist_seconds),
                 )
 
                 # STEP 5: Optional periodic SQLite backup.
@@ -214,8 +218,12 @@ def walk(
                 )
 
                 # STEP 6: Push per-page stats to the web UI.
-                _, queued_count, crawled_page_count = get_progress_counts(engine)
+                _, queued_count, crawled_page_count, db_progress_seconds = get_progress_counts(engine)
                 server.set_status("running")
+
+                # Patch the last observation with the progress-counts timing.
+                stats.patch_last_db_progress_counts(float(db_progress_seconds))
+
                 server.publish(
                     stats.to_table_rows(
                         run_pages=crawled_pages_this_run,
@@ -233,7 +241,7 @@ def walk(
                 stats.record_error(page_title=page_title, exc=exc)
                 server.set_status("error")
 
-                _, queued_count, crawled_page_count = get_progress_counts(engine)
+                _, queued_count, crawled_page_count, _ = get_progress_counts(engine)
                 server.publish(
                     stats.to_table_rows(
                         run_pages=crawled_pages_this_run,
