@@ -9,10 +9,11 @@ from __future__ import annotations
 import time
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import humanfriendly
 
+from crawl_db import DbTimings
 from utils import truncate_ascii
 
 
@@ -26,6 +27,10 @@ class PageObservation:
     api_resolve_titles_seconds: float
     api_http_requests: int
     rate_limited_responses: int
+    db_claim_seconds: float
+    db_expand_cache_seconds: float
+    db_persist_links_seconds: float
+    db_progress_counts_seconds: float
 
 
 class WalkerStats:
@@ -62,8 +67,10 @@ class WalkerStats:
         api_resolve_titles_seconds: float,
         api_http_requests: int,
         rate_limited_responses: int,
+        db_timings: DbTimings | None = None,
     ) -> None:
         self._last_visited_title = visited_title
+        t = db_timings or DbTimings()
         self._window.append(
             PageObservation(
                 page_wall_seconds=float(page_wall_seconds),
@@ -74,11 +81,26 @@ class WalkerStats:
                 api_resolve_titles_seconds=float(api_resolve_titles_seconds),
                 api_http_requests=int(api_http_requests),
                 rate_limited_responses=int(rate_limited_responses),
+                db_claim_seconds=float(t.claim_seconds),
+                db_expand_cache_seconds=float(t.expand_cache_seconds),
+                db_persist_links_seconds=float(t.persist_links_seconds),
+                db_progress_counts_seconds=float(t.progress_counts_seconds),
             )
         )
 
     def record_error(self, *, page_title: str, exc: BaseException) -> None:
         self._last_error = f"{page_title}: {exc}"
+
+    def patch_last_db_progress_counts(self, seconds: float) -> None:
+        """Update the most recent observation's progress_counts timing.
+
+        This is called after record_page because the progress query
+        happens after the page is recorded.
+        """
+        if not self._window:
+            return
+        old = self._window[-1]
+        self._window[-1] = replace(old, db_progress_counts_seconds=float(seconds))
 
     def clear_error(self) -> None:
         self._last_error = None
@@ -164,6 +186,23 @@ class WalkerStats:
                     ("Avg rate-limited responses", f"{avg_rate_limited_responses:.2f}"),
                 ]
             )
+
+        # --- DB timing breakdown ---
+        wlen = len(self._window)
+        avg_db_claim = self._avg(o.db_claim_seconds for o in self._window)
+        avg_db_expand = self._avg(o.db_expand_cache_seconds for o in self._window)
+        avg_db_persist = self._avg(o.db_persist_links_seconds for o in self._window)
+        avg_db_progress = self._avg(o.db_progress_counts_seconds for o in self._window)
+        avg_db_total = avg_db_claim + avg_db_expand + avg_db_persist + avg_db_progress
+
+        rows.append((
+            f"Avg DB total (last {wlen})",
+            self._fmt_duration(avg_db_total),
+        ))
+        rows.append(("Avg DB claim_next_page", self._fmt_duration(avg_db_claim)))
+        rows.append(("Avg DB expand_cache", self._fmt_duration(avg_db_expand)))
+        rows.append(("Avg DB persist_links", self._fmt_duration(avg_db_persist)))
+        rows.append(("Avg DB progress_counts", self._fmt_duration(avg_db_progress)))
 
         if self._last_error:
             rows.append(("Last error", self._last_error))
