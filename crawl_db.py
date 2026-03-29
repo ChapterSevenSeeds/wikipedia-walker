@@ -56,18 +56,38 @@ def get_progress_counts(engine) -> tuple[int, int, int, DbTimings]:
 
     t0 = time.monotonic()
     with Session(engine) as session:
-        queued_count = session.scalar(
-            select(func.count()).select_from(Page).where(Page.crawl_status == PageCrawlStatus.queued)
+        # Use scalar subqueries so SQLite can plan each COUNT independently (and
+        # potentially use different indexes) while still doing a single roundtrip.
+        queued_subq = (
+            select(func.count())
+            .select_from(Page)
+            .where(Page.crawl_status == PageCrawlStatus.queued)
+            .scalar_subquery()
         )
-        done_count = session.scalar(
-            select(func.count()).select_from(Page).where(Page.crawl_status == PageCrawlStatus.done)
+        done_subq = (
+            select(func.count())
+            .select_from(Page)
+            .where(Page.crawl_status == PageCrawlStatus.done)
+            .scalar_subquery()
         )
-        crawled_page_count = session.scalar(
-            select(func.count()).select_from(Page).where(Page.last_links_recorded_at.is_not(None))
+        crawled_subq = (
+            select(func.count())
+            .select_from(Page)
+            .where(Page.last_links_recorded_at.is_not(None))
+            .scalar_subquery()
         )
+
+        done_count, queued_count, crawled_page_count = session.execute(
+            select(done_subq, queued_subq, crawled_subq)
+        ).one()
     elapsed = time.monotonic() - t0
 
-    return int(done_count or 0), int(queued_count or 0), int(crawled_page_count or 0), DbTimings(progress_counts_seconds=elapsed)
+    return (
+        int(done_count or 0),
+        int(queued_count or 0),
+        int(crawled_page_count or 0),
+        DbTimings(progress_counts_seconds=elapsed),
+    )
 
 
 def get_or_create_page(session: Session, ref: MediaWikiPageReference) -> Page:
@@ -194,20 +214,6 @@ def record_links(
     return pages_created, pages_existing
 
 
-def next_queued_page(session: Session) -> Page | None:
-    """Return the next queued page to crawl, or None if none exists."""
-
-    return session.scalar(
-        select(Page)
-        .where(
-            Page.crawl_status == PageCrawlStatus.queued,
-            Page.last_links_recorded_at.is_(None),
-        )
-        .order_by(Page.last_enqueued_at.asc().nulls_last(), Page.mw_page_id.asc())
-        .limit(1)
-    )
-
-
 def get_outgoing_pages(session: Session, page: Page) -> Sequence[MediaWikiPageReference]:
     """Return the known outgoing pages from a given page."""
 
@@ -274,16 +280,32 @@ def claim_next_page_from_queue(engine) -> tuple[int, str, DbTimings] | None:
 
     t0 = time.monotonic()
     with Session(engine) as session:
-        page = next_queued_page(session)
-        if page is None:
+        now = utc_now()
+        candidate_id = (
+            select(Page.mw_page_id)
+            .where(
+                Page.crawl_status == PageCrawlStatus.queued,
+                Page.last_links_recorded_at.is_(None),
+            )
+            .order_by(Page.last_enqueued_at.asc(), Page.mw_page_id.asc())
+            .limit(1)
+            .scalar_subquery()
+        )
+
+        # Single statement: find + claim + return identity.
+        row = session.execute(
+            update(Page)
+            .where(Page.mw_page_id == candidate_id)
+            .values(crawl_status=PageCrawlStatus.in_progress, last_started_at=now)
+            .returning(Page.mw_page_id, Page.title)
+        ).first()
+
+        if row is None:
             return None
 
-        page.crawl_status = PageCrawlStatus.in_progress
-        page.last_started_at = utc_now()
         session.commit()
-
         elapsed = time.monotonic() - t0
-        return int(page.mw_page_id), page.title, DbTimings(claim_seconds=elapsed)
+        return int(row[0]), str(row[1]), DbTimings(claim_seconds=elapsed)
 
 
 def expand_page_from_cached_links(engine, *, page_id: int) -> tuple[bool, int, int, DbTimings]:
