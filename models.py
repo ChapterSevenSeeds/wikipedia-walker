@@ -3,7 +3,19 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Integer, String, UniqueConstraint, create_engine, event, func
+from sqlalchemy import (
+    DateTime,
+    Enum as SAEnum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    create_engine,
+    event,
+    func,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -56,6 +68,23 @@ class Page(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        # Composite covering index for `claim_next_page_from_queue`:
+        # WHERE crawl_status='queued' AND last_links_recorded_at IS NULL
+        # ORDER BY last_enqueued_at ASC, mw_page_id ASC  LIMIT 1
+        # SQLite uses leading columns for equality + IS NULL, then walks
+        # remaining columns in index order — no temp sort needed.
+        Index(
+            "ix_pages_queue_claim",
+            crawl_status,
+            last_links_recorded_at,
+            last_enqueued_at,
+            mw_page_id,
+        ),
+        # Speeds up `get_progress_counts` for crawled pages.
+        Index("ix_pages_last_links_recorded_at", last_links_recorded_at),
     )
 
     out_links: Mapped[list[PageLink]] = relationship(
@@ -143,5 +172,24 @@ def make_engine(db_path: str):
     return engine
 
 
+# Indexes removed from the model that should be dropped from existing DBs.
+_STALE_INDEXES = [
+    "ix_pages_queue_claim_order",
+]
+
+
 def init_db(engine) -> None:
+    # `create_all()` will create tables that don't exist, but (for SQLite)
+    # it does not reliably add newly-declared indexes to already-existing tables.
+    # Create indexes explicitly with checkfirst=True so upgrading the model
+    # definition upgrades the on-disk DB.
     Base.metadata.create_all(engine)
+
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            for idx in table.indexes:
+                idx.create(conn, checkfirst=True)
+
+        # Drop indexes that were replaced or are no longer needed.
+        for name in _STALE_INDEXES:
+            conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
