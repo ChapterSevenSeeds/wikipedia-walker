@@ -10,7 +10,7 @@ logic while grouping reusable helpers here.
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator, Sequence, TypeVar
 
 
 def timestamp_for_filename(dt: datetime) -> str:
@@ -73,7 +73,8 @@ def run_sqlite_backup(*, db_path: str, backup_dir: Path, max_count: int) -> Path
     return dest_path
 
 
-def chunked(items: Sequence[str], chunk_size: int) -> Iterator[list[str]]:
+T = TypeVar("T")
+def chunked(items: Sequence[T], chunk_size: int) -> Iterator[list[T]]:
     """Yield items in fixed-size chunks."""
 
     for start_index in range(0, len(items), chunk_size):
